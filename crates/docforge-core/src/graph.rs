@@ -235,6 +235,20 @@ impl Graph {
         Ok(result)
     }
 
+    /// Swaps in a new node under the same id, keeping its connections where
+    /// the new node still has matching ports. Returns the old node.
+    pub fn replace_node(
+        &mut self,
+        id: NodeId,
+        node: Box<dyn Node>,
+    ) -> Result<Box<dyn Node>, GraphError> {
+        let entry = self.nodes.get_mut(&id).ok_or(GraphError::UnknownNode(id))?;
+        let old = std::mem::replace(&mut entry.node, node);
+        entry.dirty = true;
+        self.prune_edges(id);
+        Ok(old)
+    }
+
     /// Forces a node (and therefore its dependents) to recompute.
     pub fn invalidate(&mut self, id: NodeId) {
         if let Some(entry) = self.nodes.get_mut(&id) {
@@ -256,6 +270,17 @@ impl Graph {
         from_port: &str,
         to: NodeId,
         to_port: &str,
+    ) -> Result<(), GraphError> {
+        self.connect_inner(from, from_port, to, to_port, true)
+    }
+
+    fn connect_inner(
+        &mut self,
+        from: NodeId,
+        from_port: &str,
+        to: NodeId,
+        to_port: &str,
+        invalidate: bool,
     ) -> Result<(), GraphError> {
         let src = self.entry(from)?;
         let dst = self.entry(to)?;
@@ -302,7 +327,9 @@ impl Graph {
             self.edges.retain(|e| e.to != edge.to);
         }
         self.edges.push(edge);
-        self.invalidate(to);
+        if invalidate {
+            self.invalidate(to);
+        }
         Ok(())
     }
 
@@ -430,6 +457,15 @@ impl Graph {
             && !entry.node.needs_refresh(ctx);
         if !up_to_date {
             let result = run_node(entry.node.as_ref(), &inputs, ctx);
+            if matches!(result, Err(NodeError::Cancelled)) {
+                // Not a result worth caching: leave the node dirty so the next
+                // pass runs it again.
+                let entry = self.nodes.get_mut(&id).expect("node exists");
+                entry.dirty = true;
+                entry.state = State::Pending;
+                report.cancelled = true;
+                return;
+            }
             self.next_gen += 1;
             let entry = self.nodes.get_mut(&id).expect("node exists");
             entry.dirty = false;
@@ -609,6 +645,66 @@ impl Graph {
             graph.connect(e.from.node, &e.from.port, e.to.node, &e.to.port)?;
         }
         Ok(graph)
+    }
+
+    /// Makes this graph structurally identical to `doc` while keeping the
+    /// cached results of every node whose kind and parameters are unchanged.
+    ///
+    /// This lets an editor own the document and hand snapshots to a
+    /// background evaluator, which then only recomputes what actually changed.
+    /// A node whose parameters changed is rebuilt from `doc` and receives its
+    /// predecessor through [`Node::inherit_state`], so it can keep internal
+    /// caches.
+    pub fn sync_from_doc(
+        &mut self,
+        doc: &GraphDoc,
+        registry: &NodeRegistry,
+    ) -> Result<(), GraphError> {
+        if doc.version > GRAPH_FORMAT_VERSION {
+            return Err(GraphError::UnsupportedVersion {
+                found: doc.version,
+                supported: GRAPH_FORMAT_VERSION,
+            });
+        }
+        let wanted: HashSet<NodeId> = doc.nodes.iter().map(|n| n.id).collect();
+        if wanted.len() != doc.nodes.len() {
+            let mut seen = HashSet::new();
+            let dup = doc
+                .nodes
+                .iter()
+                .find(|n| !seen.insert(n.id))
+                .expect("a duplicate exists");
+            return Err(GraphError::DuplicateId(dup.id));
+        }
+        self.nodes.retain(|id, _| wanted.contains(id));
+
+        for nd in &doc.nodes {
+            let unchanged = self.nodes.get(&nd.id).is_some_and(|e| {
+                e.node.kind() == nd.kind && e.node.save_params().ok().as_ref() == Some(&nd.params)
+            });
+            if unchanged {
+                self.nodes.get_mut(&nd.id).expect("checked above").meta = nd.meta.clone();
+            } else {
+                let mut node = registry.deserialize(&nd.kind, nd.params.clone())?;
+                if let Some(old) = self.nodes.remove(&nd.id)
+                    && old.node.kind() == nd.kind
+                {
+                    node.inherit_state(old.node.as_ref());
+                }
+                self.nodes.insert(nd.id, Entry::new(node, nd.meta.clone()));
+            }
+            self.next_id = self.next_id.max(nd.id.0.saturating_add(1));
+        }
+
+        if self.edges != doc.edges {
+            // Rewiring needs no explicit invalidation: a node's cache is keyed
+            // on the generations of its inputs, which change with the wiring.
+            self.edges.clear();
+            for e in &doc.edges {
+                self.connect_inner(e.from.node, &e.from.port, e.to.node, &e.to.port, false)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn to_json(&self) -> Result<String, GraphError> {

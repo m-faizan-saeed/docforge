@@ -402,3 +402,127 @@ fn editing_group_ports_prunes_stale_edges() {
     assert!(g.edges().is_empty());
     assert_eq!(g.node(group).unwrap().inputs()[0].name, "renamed");
 }
+
+/// Records whether it took over a predecessor's state.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct Stateful {
+    level: u8,
+    #[serde(skip)]
+    inherited: bool,
+}
+
+impl Node for Stateful {
+    fn kind(&self) -> &'static str {
+        Self::KIND
+    }
+    fn outputs(&self) -> Cow<'_, [PortSpec]> {
+        Cow::Borrowed(IMAGE_OUT)
+    }
+    fn evaluate(&self, _: &Inputs, _: &EvalContext) -> Result<Vec<Value>, NodeError> {
+        Ok(vec![RasterImage::new(1, 1, [self.level; 4]).into()])
+    }
+    fn inherit_state(&mut self, previous: &dyn Node) {
+        self.inherited = previous.downcast_ref::<Stateful>().is_some();
+    }
+}
+
+impl NodeType for Stateful {
+    const KIND: &'static str = "stateful";
+    const DISPLAY_NAME: &'static str = "Stateful";
+}
+
+#[test]
+fn sync_from_doc_keeps_unchanged_caches() {
+    let reg = {
+        let mut r = registry();
+        r.register::<Stateful>();
+        r
+    };
+    let ctx = EvalContext::new();
+
+    // The "editor" document and the "evaluator" copy.
+    let mut doc_graph = Graph::new();
+    let src = doc_graph.add(Solid {
+        color: [0, 0, 0, 255],
+    });
+    let inv = doc_graph.add(Invert);
+    let other = doc_graph.add(Stateful::default());
+    doc_graph.connect(src, "image", inv, "image").unwrap();
+    let mut eval = Graph::from_doc(doc_graph.to_doc().unwrap(), &reg).unwrap();
+    let mut first = eval.evaluate(&ctx).recomputed;
+    first.sort();
+    assert_eq!(first, [src, inv, other]);
+
+    // Identical snapshot, or only layout changes: nothing recomputes.
+    doc_graph.meta_mut(src).unwrap().position = [50.0, 50.0];
+    eval.sync_from_doc(&doc_graph.to_doc().unwrap(), &reg)
+        .unwrap();
+    assert!(eval.evaluate(&ctx).recomputed.is_empty());
+    assert_eq!(eval.meta(src).unwrap().position, [50.0, 50.0]);
+
+    // A parameter edit recomputes that node and its dependents only, and the
+    // rebuilt node inherits its predecessor's state.
+    doc_graph
+        .edit_node::<Stateful, _>(other, |s| s.level = 9)
+        .unwrap();
+    eval.sync_from_doc(&doc_graph.to_doc().unwrap(), &reg)
+        .unwrap();
+    assert!(eval.node_as::<Stateful>(other).unwrap().inherited);
+    assert_eq!(eval.evaluate(&ctx).recomputed, [other]);
+
+    // Rewiring and removal.
+    let inv2 = doc_graph.add(Invert);
+    doc_graph.connect(inv, "image", inv2, "image").unwrap();
+    doc_graph.remove_node(other);
+    eval.sync_from_doc(&doc_graph.to_doc().unwrap(), &reg)
+        .unwrap();
+    assert!(!eval.contains(other));
+    assert_eq!(eval.evaluate(&ctx).recomputed, [inv2]);
+    assert_eq!(first_pixel(&eval, inv2), [0, 0, 0, 255]);
+    assert_eq!(eval.edges(), doc_graph.edges());
+}
+
+static CANCEL_NEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[derive(Default, Serialize, Deserialize)]
+struct Cancellable;
+
+impl Node for Cancellable {
+    fn kind(&self) -> &'static str {
+        "cancellable"
+    }
+    fn outputs(&self) -> Cow<'_, [PortSpec]> {
+        Cow::Borrowed(IMAGE_OUT)
+    }
+    fn evaluate(&self, _: &Inputs, _: &EvalContext) -> Result<Vec<Value>, NodeError> {
+        if CANCEL_NEXT.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            return Err(NodeError::Cancelled);
+        }
+        Ok(vec![RasterImage::new(1, 1, [0; 4]).into()])
+    }
+}
+
+#[test]
+fn cancelled_nodes_are_retried_not_cached() {
+    let mut g = Graph::new();
+    let c = g.add(Cancellable);
+    let after = g.add(Invert);
+    g.connect(c, "image", after, "image").unwrap();
+    let ctx = EvalContext::new();
+
+    CANCEL_NEXT.store(true, std::sync::atomic::Ordering::SeqCst);
+    let report = g.evaluate(&ctx);
+    assert!(report.cancelled && report.failed.is_empty());
+    assert!(matches!(g.status(c), Some(NodeStatus::Pending)));
+
+    let report = g.evaluate(&ctx);
+    assert!(report.is_ok());
+    assert_eq!(report.recomputed, [c, after]);
+
+    // A cancel flag raised before the pass stops it before any node runs.
+    let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    g.invalidate(c);
+    let report = g.evaluate(&EvalContext::new().with_cancel_flag(flag));
+    assert!(report.cancelled && report.recomputed.is_empty());
+}

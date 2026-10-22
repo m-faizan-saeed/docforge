@@ -1,0 +1,18 @@
+[package]
+name = "docforge-app"
+description = "Desktop node editor for docforge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "docforge"
+path = "src/main.rs"
+
+[dependencies]
+docforge-core.workspace = true
+docforge-nodes.workspace = true
+eframe = "0.37"
+rfd = "0.17"
+serde_json.workspace = true

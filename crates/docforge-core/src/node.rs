@@ -51,6 +51,12 @@ pub trait Node: Any + Send + Sync + SaveParams {
     fn needs_refresh(&self, _ctx: &EvalContext) -> bool {
         false
     }
+
+    /// Called when this node replaces `previous` (same kind, edited
+    /// parameters) during [`crate::Graph::sync_from_doc`]. Nodes with internal
+    /// caches can take them over here; stale entries must be validated by the
+    /// node itself.
+    fn inherit_state(&mut self, _previous: &dyn Node) {}
 }
 
 impl dyn Node {
