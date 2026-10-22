@@ -1,0 +1,17 @@
+[package]
+name = "docforge-nodes"
+description = "Built-in docforge tools (nodes)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+docforge-core.workspace = true
+image = { workspace = true, features = ["png", "jpeg", "webp", "tiff", "bmp", "gif", "rayon"] }
+png.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
