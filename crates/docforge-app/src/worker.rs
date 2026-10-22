@@ -21,7 +21,7 @@ use std::{
 use docforge_core::{
     EvalContext, Graph, GraphDoc, NodeError, NodeId, NodeRegistry, NodeStatus, Value,
 };
-use docforge_nodes::OutputImage;
+use docforge_nodes::{OutputImage, PrintLayout};
 
 pub struct Job {
     pub rev: u64,
@@ -170,10 +170,14 @@ impl Worker {
                 Some(NodeStatus::Pending) | None => NodeResult::Pending,
             };
             result.nodes.insert(id, status);
-            if let Some(path) = node
+            let written = node
                 .downcast_ref::<OutputImage>()
                 .and_then(OutputImage::last_written_path)
-            {
+                .or_else(|| {
+                    node.downcast_ref::<PrintLayout>()
+                        .and_then(PrintLayout::last_written_path)
+                });
+            if let Some(path) = written {
                 result.written.insert(id, path);
             }
         }

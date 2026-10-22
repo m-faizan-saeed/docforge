@@ -5,6 +5,7 @@
 mod app;
 mod canvas;
 mod inspector;
+mod pdf_view;
 mod viewport;
 mod worker;
 

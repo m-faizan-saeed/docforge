@@ -7,11 +7,13 @@ use std::path::{Path, PathBuf};
 
 use docforge_core::{Graph, NodeId, NodeRegistry, NodeType as _};
 use docforge_nodes::{
-    Effect, EnhanceImage, IfExists, InputImage, OutputImage, PngCompression, SaveFormat, Step,
+    Effect, EnhanceImage, IfExists, InputImage, OutputImage, PngCompression, PrintLayout,
+    SaveFormat, Step,
     enhance::{
         AutoCrop, BlackAndWhite, BrightnessContrast, Crop, DetectDocument, Line, MagicColor,
         Rectangle, Rotate, Sharpen, Watermark,
     },
+    print::{self, CutMarks, ItemSize, PageOrientation, Paper},
 };
 use eframe::egui::{self, Color32, DragValue, Grid, RichText, Slider, TextEdit, Ui};
 
@@ -33,6 +35,31 @@ pub fn node_params(ui: &mut Ui, graph: &mut Graph, id: NodeId, registry: &NodeRe
         k if k == EnhanceImage::KIND => graph
             .edit_node::<EnhanceImage, _>(id, |n| enhance_image(ui, n))
             .unwrap_or(false),
+        k if k == PrintLayout::KIND => {
+            // Name each piece after the node feeding it, in connection order.
+            let sources: Vec<String> = graph
+                .edges()
+                .iter()
+                .filter(|e| e.to.node == id && e.to.port == print::INPUT)
+                .map(|e| {
+                    let label = graph.meta(e.from.node).and_then(|m| m.label.clone());
+                    let kind = graph
+                        .node(e.from.node)
+                        .map(|n| n.kind())
+                        .unwrap_or_default();
+                    label.unwrap_or_else(|| {
+                        format!(
+                            "{} {}",
+                            crate::canvas::display_name(registry, kind),
+                            e.from.node
+                        )
+                    })
+                })
+                .collect();
+            graph
+                .edit_node::<PrintLayout, _>(id, |n| print_layout(ui, n, salt, &sources))
+                .unwrap_or(false)
+        }
         _ => raw_json(ui, graph, id, registry),
     }
 }
@@ -188,6 +215,284 @@ fn if_exists_name(p: IfExists) -> &'static str {
         IfExists::Overwrite => "Overwrite",
         IfExists::Error => "Fail",
         IfExists::Rename => "Add a number",
+    }
+}
+
+// ----- Print Layout ----------------------------------------------------------
+
+fn print_layout(ui: &mut Ui, node: &mut PrintLayout, salt: u64, sources: &[String]) -> bool {
+    let mut changed = false;
+
+    ui.strong("Pieces");
+    if sources.is_empty() {
+        ui.label(
+            RichText::new("Connect images to the “images” input; each becomes a piece.").weak(),
+        );
+    }
+    for (i, source) in sources.iter().enumerate() {
+        let mut item = node.item(i);
+        let before = item.clone();
+        ui.push_id(("piece", i), |ui| {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("{}. {source}", i + 1)).strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add(DragValue::new(&mut item.copies).range(0..=500).suffix(" ×"));
+                        ui.label("Copies");
+                    });
+                });
+                item_size(ui, &mut item.size);
+            });
+        });
+        if item != before {
+            *node.item_mut(i) = item;
+            changed = true;
+        }
+    }
+
+    ui.add_space(6.0);
+    ui.strong("Paper");
+    Grid::new("paper_grid")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Size");
+            egui::ComboBox::from_id_salt("paper")
+                .selected_text(node.paper.name())
+                .show_ui(ui, |ui| {
+                    for p in Paper::ALL {
+                        changed |= ui.selectable_value(&mut node.paper, p, p.name()).changed();
+                    }
+                });
+            ui.end_row();
+            if node.paper == Paper::Custom {
+                ui.label("Custom size");
+                changed |= mm_pair(ui, &mut node.custom_paper_mm);
+                ui.end_row();
+            }
+            ui.label("Orientation");
+            egui::ComboBox::from_id_salt("orientation")
+                .selected_text(format!("{:?}", node.orientation))
+                .show_ui(ui, |ui| {
+                    for o in [
+                        PageOrientation::Auto,
+                        PageOrientation::Portrait,
+                        PageOrientation::Landscape,
+                    ] {
+                        let label = if o == PageOrientation::Auto {
+                            "Auto (fewest pages)".into()
+                        } else {
+                            format!("{o:?}")
+                        };
+                        changed |= ui
+                            .selectable_value(&mut node.orientation, o, label)
+                            .changed();
+                    }
+                });
+            ui.end_row();
+            ui.label("Margin");
+            changed |= ui
+                .add(
+                    DragValue::new(&mut node.margin_mm)
+                        .range(0.0..=60.0)
+                        .speed(0.5)
+                        .suffix(" mm"),
+                )
+                .changed();
+            ui.end_row();
+            ui.label("Gap between pieces");
+            changed |= ui
+                .add(
+                    DragValue::new(&mut node.gap_mm)
+                        .range(0.0..=40.0)
+                        .speed(0.5)
+                        .suffix(" mm"),
+                )
+                .changed();
+            ui.end_row();
+            ui.label("Cutting lines");
+            egui::ComboBox::from_id_salt("cut_marks")
+                .selected_text(cut_marks_name(node.cut_marks))
+                .show_ui(ui, |ui| {
+                    for c in [CutMarks::Outline, CutMarks::CropMarks, CutMarks::None] {
+                        changed |= ui
+                            .selectable_value(&mut node.cut_marks, c, cut_marks_name(c))
+                            .changed();
+                    }
+                });
+            ui.end_row();
+        });
+    changed |= ui
+        .checkbox(
+            &mut node.allow_rotation,
+            "Turn pieces 90° when it saves paper",
+        )
+        .changed();
+
+    ui.add_space(6.0);
+    ui.strong("PDF");
+    Grid::new("pdf_grid")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Image resolution");
+            changed |= ui
+                .add(
+                    DragValue::new(&mut node.image_dpi)
+                        .range(72.0..=1200.0)
+                        .speed(5.0)
+                        .suffix(" dpi"),
+                )
+                .on_hover_text("Images are downsampled to this; higher means larger files")
+                .changed();
+            ui.end_row();
+            ui.label("Compression");
+            ui.horizontal(|ui| {
+                let mut lossless = node.jpeg_quality.is_none();
+                if ui.checkbox(&mut lossless, "Lossless").changed() {
+                    node.jpeg_quality = (!lossless).then_some(90);
+                    changed = true;
+                }
+                if let Some(q) = &mut node.jpeg_quality {
+                    changed |= ui.add(Slider::new(q, 1..=100).text("JPEG")).changed();
+                }
+            });
+            ui.end_row();
+        });
+    ui.label("Save PDF to");
+    ui.horizontal(|ui| {
+        changed |= path_field(
+            ui,
+            ("pdf_path", salt),
+            &mut node.path,
+            "Choose a .pdf file…",
+        );
+        if ui.button("Browse…").clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("PDF", &["pdf"])
+                .set_directory(start_dir(&node.path))
+                .set_file_name("print.pdf")
+                .save_file()
+        {
+            node.path = path;
+            changed = true;
+        }
+    });
+    changed |= ui
+        .checkbox(&mut node.auto_save, "Save automatically on every change")
+        .changed();
+    changed
+}
+
+fn item_size(ui: &mut Ui, size: &mut ItemSize) {
+    let mode = match size {
+        ItemSize::FromDpi { .. } => 0,
+        ItemSize::Width { .. } => 1,
+        ItemSize::Exact { .. } => 2,
+    };
+    ui.horizontal(|ui| {
+        ui.label("Size");
+        egui::ComboBox::from_id_salt("size_mode")
+            .selected_text(["Real size (from DPI)", "Set width", "Exact size"][mode])
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(mode == 0, "Real size (from DPI)")
+                    .clicked()
+                    && mode != 0
+                {
+                    *size = ItemSize::default();
+                }
+                if ui.selectable_label(mode == 1, "Set width").clicked() && mode != 1 {
+                    *size = ItemSize::Width { width_mm: 85.6 };
+                }
+                if ui.selectable_label(mode == 2, "Exact size").clicked() && mode != 2 {
+                    *size = ItemSize::Exact {
+                        width_mm: 85.6,
+                        height_mm: 54.0,
+                    };
+                }
+            });
+        ui.menu_button("Presets", |ui| {
+            for (name, w, h) in ItemSize::PRESETS {
+                if ui.button(name).clicked() {
+                    *size = ItemSize::Exact {
+                        width_mm: w,
+                        height_mm: h,
+                    };
+                    ui.close();
+                }
+            }
+        });
+    });
+    match size {
+        ItemSize::FromDpi { fallback_dpi } => {
+            ui.horizontal(|ui| {
+                ui.label("If the image has no DPI, assume");
+                ui.add(
+                    DragValue::new(fallback_dpi)
+                        .range(10.0..=2400.0)
+                        .suffix(" dpi"),
+                );
+            });
+        }
+        ItemSize::Width { width_mm } => {
+            ui.horizontal(|ui| {
+                ui.label("Width");
+                ui.add(
+                    DragValue::new(width_mm)
+                        .range(1.0..=2000.0)
+                        .speed(0.5)
+                        .suffix(" mm"),
+                );
+                ui.label(RichText::new("height follows the image").weak());
+            });
+        }
+        ItemSize::Exact {
+            width_mm,
+            height_mm,
+        } => {
+            ui.horizontal(|ui| {
+                let mut pair = [*width_mm, *height_mm];
+                mm_pair(ui, &mut pair);
+                [*width_mm, *height_mm] = pair;
+                if ui
+                    .small_button("⟲")
+                    .on_hover_text("Swap width and height")
+                    .clicked()
+                {
+                    std::mem::swap(width_mm, height_mm);
+                }
+            });
+        }
+    }
+}
+
+fn mm_pair(ui: &mut Ui, pair: &mut [f32; 2]) -> bool {
+    ui.horizontal(|ui| {
+        let w = ui.add(
+            DragValue::new(&mut pair[0])
+                .range(1.0..=2000.0)
+                .speed(0.5)
+                .suffix(" mm"),
+        );
+        ui.label("×");
+        let h = ui.add(
+            DragValue::new(&mut pair[1])
+                .range(1.0..=2000.0)
+                .speed(0.5)
+                .suffix(" mm"),
+        );
+        w.changed() || h.changed()
+    })
+    .inner
+}
+
+fn cut_marks_name(c: CutMarks) -> &'static str {
+    match c {
+        CutMarks::Outline => "Dashed outline",
+        CutMarks::CropMarks => "Corner crop marks",
+        CutMarks::None => "None",
     }
 }
 

@@ -394,7 +394,7 @@ fn write_png(
 
 /// Writes through a temporary sibling and renames it over `target`, so the
 /// target is either the old file or the complete new one, never partial.
-fn write_atomic(
+pub(crate) fn write_atomic(
     target: &Path,
     encode: impl FnOnce(&mut BufWriter<File>) -> Result<(), Box<dyn Error + Send + Sync>>,
 ) -> Result<(), NodeError> {

@@ -10,12 +10,14 @@ use crate::RasterImage;
 #[serde(rename_all = "snake_case")]
 pub enum PortType {
     Image,
+    Document,
 }
 
 impl fmt::Display for PortType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Image => "image",
+            Self::Document => "document",
         })
     }
 }
@@ -25,18 +27,28 @@ impl fmt::Display for PortType {
 #[derive(Clone, Debug)]
 pub enum Value {
     Image(Arc<RasterImage>),
+    Document(Arc<PdfDocument>),
 }
 
 impl Value {
     pub fn port_type(&self) -> PortType {
         match self {
             Self::Image(_) => PortType::Image,
+            Self::Document(_) => PortType::Document,
         }
     }
 
     pub fn as_image(&self) -> Option<&Arc<RasterImage>> {
         match self {
             Self::Image(img) => Some(img),
+            _ => None,
+        }
+    }
+
+    pub fn as_document(&self) -> Option<&Arc<PdfDocument>> {
+        match self {
+            Self::Document(doc) => Some(doc),
+            _ => None,
         }
     }
 
@@ -44,6 +56,8 @@ impl Value {
     pub fn ptr_eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Image(a), Self::Image(b)) => Arc::ptr_eq(a, b),
+            (Self::Document(a), Self::Document(b)) => Arc::ptr_eq(a, b),
+            _ => false,
         }
     }
 }
@@ -57,6 +71,28 @@ impl From<RasterImage> for Value {
 impl From<Arc<RasterImage>> for Value {
     fn from(img: Arc<RasterImage>) -> Self {
         Self::Image(img)
+    }
+}
+
+impl From<PdfDocument> for Value {
+    fn from(doc: PdfDocument) -> Self {
+        Self::Document(Arc::new(doc))
+    }
+}
+
+/// A finished, printable PDF together with facts about its layout.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PdfDocument {
+    pub bytes: Vec<u8>,
+    /// Width and height of each page in millimetres.
+    pub pages_mm: Vec<[f32; 2]>,
+    /// Human-readable notes about how it was produced, e.g. paper usage.
+    pub summary: Vec<String>,
+}
+
+impl AsRef<[u8]> for PdfDocument {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -88,6 +124,16 @@ impl PortSpec {
         Self {
             name: Cow::Borrowed(name),
             ty: PortType::Image,
+            required: true,
+            multi: false,
+        }
+    }
+
+    /// Required single document port; usable in `const` port tables.
+    pub const fn document(name: &'static str) -> Self {
+        Self {
+            name: Cow::Borrowed(name),
+            ty: PortType::Document,
             required: true,
             multi: false,
         }

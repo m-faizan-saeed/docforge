@@ -48,7 +48,27 @@ impl Viewport {
         self.fit = true;
     }
 
+    /// Current zoom: screen points per logical unit (an image pixel, unless
+    /// shown scaled).
+    pub fn zoom(&self) -> f32 {
+        self.zoom
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui, image: Option<&Arc<RasterImage>>, placeholder: &str) {
+        self.show_scaled(ui, image, 1.0, None, placeholder);
+    }
+
+    /// Shows `image` at `scale` logical units per pixel, so the same content
+    /// rendered at different resolutions keeps its on-screen size. `facts`
+    /// replaces the pixel-size description in the toolbar.
+    pub fn show_scaled(
+        &mut self,
+        ui: &mut egui::Ui,
+        image: Option<&Arc<RasterImage>>,
+        scale: f32,
+        facts: Option<String>,
+        placeholder: &str,
+    ) {
         let Some(image) = image else {
             self.shown = None;
             let rect = ui.available_rect_before_wrap();
@@ -63,9 +83,9 @@ impl Viewport {
             return;
         };
         self.upload_if_changed(ui.ctx(), image);
-        let img_size = vec2(image.width() as f32, image.height() as f32);
+        let img_size = vec2(image.width() as f32, image.height() as f32) * scale;
 
-        self.toolbar(ui, image);
+        self.toolbar(ui, image, facts);
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
@@ -110,14 +130,14 @@ impl Viewport {
         }
 
         self.hover_px = response.hover_pos().and_then(|pointer| {
-            let p = (pointer - image_rect.min) / self.zoom;
-            (p.x >= 0.0 && p.y >= 0.0 && p.x < img_size.x && p.y < img_size.y)
+            let p = (pointer - image_rect.min) / (self.zoom * scale);
+            (p.x >= 0.0 && p.y >= 0.0 && p.x < image.width() as f32 && p.y < image.height() as f32)
                 .then_some((p.x as u32, p.y as u32))
         });
     }
 
     /// Zoom controls, image facts and the hovered pixel.
-    fn toolbar(&mut self, ui: &mut egui::Ui, image: &RasterImage) {
+    fn toolbar(&mut self, ui: &mut egui::Ui, image: &RasterImage, facts: Option<String>) {
         ui.horizontal(|ui| {
             if ui
                 .button("Fit")
@@ -133,10 +153,13 @@ impl Viewport {
             }
             ui.label(format!("{:.0}%", self.zoom * 100.0));
             ui.separator();
-            let mut facts = format!("{} × {} px", image.width(), image.height());
-            if let (Some(dpi), Some((w, h))) = (image.dpi(), image.size_mm()) {
-                facts += &format!(" · {dpi:.0} dpi · {w:.1} × {h:.1} mm");
-            }
+            let facts = facts.unwrap_or_else(|| {
+                let mut facts = format!("{} × {} px", image.width(), image.height());
+                if let (Some(dpi), Some((w, h))) = (image.dpi(), image.size_mm()) {
+                    facts += &format!(" · {dpi:.0} dpi · {w:.1} × {h:.1} mm");
+                }
+                facts
+            });
             ui.label(facts);
             if let Some((x, y)) = self.hover_px
                 && let Some([r, g, b, a]) = image.get_pixel(x, y)

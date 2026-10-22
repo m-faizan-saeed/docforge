@@ -138,6 +138,19 @@ impl Inputs {
     }
 }
 
+impl Inputs {
+    pub fn document(&self, port: &str) -> Result<&Arc<crate::PdfDocument>, NodeError> {
+        let value = self
+            .get(port)
+            .ok_or_else(|| NodeError::MissingInput(port.to_owned()))?;
+        value.as_document().ok_or_else(|| NodeError::InputType {
+            port: port.to_owned(),
+            expected: crate::PortType::Document,
+            actual: value.port_type(),
+        })
+    }
+}
+
 fn expect_image<'a>(port: &str, value: &'a Value) -> Result<&'a Arc<RasterImage>, NodeError> {
     value.as_image().ok_or_else(|| NodeError::InputType {
         port: port.to_owned(),

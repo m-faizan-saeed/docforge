@@ -35,7 +35,7 @@ pub use group::{GROUP_VALUE_PORT, GroupInput, GroupNode, GroupOutput};
 pub use node::{EvalContext, Inputs, Node, NodeType, SaveParams};
 pub use raster::RasterImage;
 pub use registry::{CreateFn, DeserializeFn, NodeDescriptor, NodeRegistry};
-pub use value::{PortSpec, PortType, Value};
+pub use value::{PdfDocument, PortSpec, PortType, Value};
 
 /// Re-exported so node crates convert to and from the exact `image` version
 /// that [`RasterImage`] was built against.

@@ -11,6 +11,7 @@ ab_glyph.workspace = true
 docforge-core.workspace = true
 epaint_default_fonts.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "webp", "tiff", "bmp", "gif", "rayon"] }
+lopdf.workspace = true
 png.workspace = true
 rayon.workspace = true
 serde.workspace = true

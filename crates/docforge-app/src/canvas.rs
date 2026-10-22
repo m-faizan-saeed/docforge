@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use docforge_core::{Edge, Graph, NodeId, NodeRegistry, PortRef, PortSpec};
+use docforge_core::{Edge, Graph, NodeId, NodeRegistry, PortRef, PortSpec, PortType};
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Shape, Stroke, StrokeKind,
     Vec2, epaint::CubicBezierShape, pos2, vec2,
@@ -195,7 +195,12 @@ impl CanvasState {
         let view_of = |id: NodeId| views.iter().find(|v| v.id == id);
 
         // --- wires ---
-        let wire_color = Color32::from_rgb(110, 170, 230);
+        let type_of = |r: &PortRef, output: bool| {
+            view_of(r.node).and_then(|v| {
+                let ports = if output { &v.outputs } else { &v.inputs };
+                ports.iter().find(|p| p.name == r.port).map(|p| p.ty)
+            })
+        };
         for Edge { from, to } in graph.edges() {
             let (Some(a), Some(b)) = (
                 view_of(from.node).and_then(|v| v.port(&layout, &from.port, true)),
@@ -203,7 +208,8 @@ impl CanvasState {
             ) else {
                 continue;
             };
-            painter.add(wire(a, b, layout.zoom, wire_color));
+            let color = type_of(from, true).map_or(Color32::GRAY, port_color);
+            painter.add(wire(a, b, layout.zoom, color));
         }
 
         // --- nodes ---
@@ -288,6 +294,7 @@ impl CanvasState {
                         .edges()
                         .iter()
                         .any(|e| if output { e.from == port } else { e.to == port });
+                    let wire_color = port_color(spec.ty);
                     painter.circle(
                         pos,
                         PORT_R * layout.zoom,
@@ -355,7 +362,10 @@ impl CanvasState {
                     WireDrag::FromOutput(_) => (anchor, pointer),
                     WireDrag::FromInput(_) => (pointer, anchor),
                 };
-                painter.add(wire(a, b, layout.zoom, wire_color.gamma_multiply(0.7)));
+                let (WireDrag::FromOutput(p) | WireDrag::FromInput(p)) = drag;
+                let output = matches!(drag, WireDrag::FromOutput(_));
+                let color = type_of(p, output).map_or(Color32::GRAY, port_color);
+                painter.add(wire(a, b, layout.zoom, color.gamma_multiply(0.7)));
             }
             if ui.input(|i| i.pointer.any_released()) {
                 let target = pointer.and_then(|p| {
@@ -427,8 +437,16 @@ fn category_color(registry: &NodeRegistry, kind: &str) -> Color32 {
     match registry.get(kind).map(|d| d.category) {
         Some("Input / Output") => Color32::from_rgb(52, 110, 84),
         Some("Processing") => Color32::from_rgb(70, 82, 150),
+        Some("Print") => Color32::from_rgb(150, 90, 40),
         Some("Group") => Color32::from_rgb(120, 90, 50),
         _ => Color32::from_rgb(90, 90, 90),
+    }
+}
+
+fn port_color(ty: PortType) -> Color32 {
+    match ty {
+        PortType::Image => Color32::from_rgb(110, 170, 230),
+        PortType::Document => Color32::from_rgb(235, 160, 70),
     }
 }
 

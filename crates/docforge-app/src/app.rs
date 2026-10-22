@@ -6,14 +6,18 @@ use std::{
 };
 
 use docforge_core::{
-    EvalContext, Graph, NodeId, NodeMeta, NodeRegistry, NodeType, PortRef, RasterImage, Value,
+    EvalContext, Graph, NodeId, NodeMeta, NodeRegistry, NodeType, PdfDocument, PortRef,
+    RasterImage, Value,
 };
-use docforge_nodes::{EnhanceImage, InputImage, OutputImage, input_image, output_image};
+use docforge_nodes::{
+    EnhanceImage, InputImage, OutputImage, PrintLayout, input_image, output_image,
+};
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText, ViewportCommand};
 
 use crate::{
     canvas::{self, CanvasEvent, CanvasState, Status},
     inspector,
+    pdf_view::PdfView,
     viewport::Viewport,
     worker::{EvalResult, Evaluator, Job, NodeResult},
 };
@@ -46,6 +50,7 @@ pub struct DocforgeApp {
     show_input: bool,
     canvas: CanvasState,
     viewport: Viewport,
+    pdf_view: PdfView,
     message: Option<(String, bool)>,
     confirm: Option<Pending>,
     title: String,
@@ -88,6 +93,7 @@ impl DocforgeApp {
             show_input: false,
             canvas: CanvasState::default(),
             viewport: Viewport::default(),
+            pdf_view: PdfView::new(cc.egui_ctx.clone()),
             message: None,
             confirm: None,
             title: String::new(),
@@ -115,7 +121,9 @@ impl DocforgeApp {
 
     fn run_smoke_test(&mut self, ctx: &egui::Context) {
         use std::sync::atomic::Ordering;
-        let busy = self.evaluator.is_busy() || self.rev != self.submitted_rev;
+        let busy = self.evaluator.is_busy()
+            || self.rev != self.submitted_rev
+            || self.pdf_view.is_rendering();
         let Some(test) = &mut self.smoke_test else {
             return;
         };
@@ -168,6 +176,14 @@ impl DocforgeApp {
             docforge_nodes::enhance::OUTPUT,
             output,
             output_image::INPUT,
+        )
+        .expect("template wiring is valid");
+        let print = g.add_node_with_meta(Box::new(PrintLayout::default()), at(480.0, 150.0));
+        g.connect(
+            enhance,
+            docforge_nodes::enhance::OUTPUT,
+            print,
+            docforge_nodes::print::INPUT,
         )
         .expect("template wiring is valid");
         self.replace_document(g, None);
@@ -352,6 +368,13 @@ impl DocforgeApp {
     fn node_image(&self, id: NodeId) -> Option<&Arc<RasterImage>> {
         match self.results.as_ref()?.nodes.get(&id)? {
             NodeResult::Ready(values) => values.iter().find_map(Value::as_image),
+            _ => None,
+        }
+    }
+
+    fn node_document(&self, id: NodeId) -> Option<&Arc<PdfDocument>> {
+        match self.results.as_ref()?.nodes.get(&id)? {
+            NodeResult::Ready(values) => values.iter().find_map(Value::as_document),
             _ => None,
         }
     }
@@ -625,6 +648,9 @@ impl DocforgeApp {
         if kind == OutputImage::KIND {
             self.save_now_button(ui, id);
         }
+        if kind == PrintLayout::KIND {
+            self.save_pdf_now_button(ui, id);
+        }
         ui.separator();
 
         egui::ScrollArea::vertical()
@@ -652,6 +678,25 @@ impl DocforgeApp {
                 ctx = ctx.with_base_dir(dir);
             }
             match node.save(&image, &ctx) {
+                Ok(path) => self.info(format!("Saved {}", path.display())),
+                Err(err) => self.error(format!("Save failed: {err}")),
+            }
+        }
+    }
+
+    fn save_pdf_now_button(&mut self, ui: &mut egui::Ui, id: NodeId) {
+        let doc = self.node_document(id).cloned();
+        let clicked = ui
+            .add_enabled(doc.is_some(), egui::Button::new("💾 Save PDF now"))
+            .on_disabled_hover_text("No PDF yet")
+            .clicked();
+        if let (true, Some(doc)) = (clicked, doc) {
+            let node = self.graph.node_as::<PrintLayout>(id).expect("checked kind");
+            let mut ctx = EvalContext::new();
+            if let Some(dir) = self.base_dir() {
+                ctx = ctx.with_base_dir(dir);
+            }
+            match node.save(&doc, &ctx) {
                 Ok(path) => self.info(format!("Saved {}", path.display())),
                 Err(err) => self.error(format!("Save failed: {err}")),
             }
@@ -689,6 +734,12 @@ impl DocforgeApp {
         });
         ui.separator();
 
+        if !self.show_input
+            && let Some(doc) = target.and_then(|id| self.node_document(id)).cloned()
+        {
+            self.pdf_view.show(ui, &doc);
+            return;
+        }
         let image = target.and_then(|id| {
             if self.show_input {
                 self.input_image_of(id)
