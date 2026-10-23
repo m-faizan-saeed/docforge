@@ -1,6 +1,7 @@
 //! Tool #4 — Print Layout: packs images onto paper at their real size and
 //! produces a printable PDF with cutting lines.
 
+pub(crate) mod art;
 pub mod pack;
 mod pdf;
 
@@ -12,20 +13,31 @@ use std::{
 };
 
 use docforge_core::{
-    EvalContext, Inputs, Node, NodeError, NodeType, PdfDocument, PortSpec, RasterImage, Value,
+    EvalContext, Inputs, Node, NodeError, NodeType, PdfDocument, PdfPageInfo, PortSpec,
+    RasterImage, Value,
 };
 use serde::{Deserialize, Serialize};
 
 pub use pack::{Orientation, Packing, Placement};
 pub use pdf::CutMarks;
 
+use art::PdfArt;
+use pdf::Artwork;
+
 use crate::{output_image::write_atomic, runtime::RuntimeState};
 
 /// Multi-input port: every connected image becomes one item, in connection order.
 pub const INPUT: &str = "images";
+/// Multi-input port: every non-blank page of each connected PDF becomes a
+/// piece, printed as vector art.
+pub const PDF_INPUT: &str = "pdfs";
 pub const OUTPUT: &str = "pdf";
 
-const INPUTS: &[PortSpec] = &[PortSpec::image(INPUT).multi()];
+// Both optional: a layout needs images, PDFs, or both (checked in `evaluate`).
+const INPUTS: &[PortSpec] = &[
+    PortSpec::image(INPUT).multi().optional(),
+    PortSpec::document(PDF_INPUT).multi().optional(),
+];
 const OUTPUTS: &[PortSpec] = &[PortSpec::document(OUTPUT)];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +119,22 @@ impl Default for ItemSize {
 }
 
 impl ItemSize {
+    /// Size of vector art whose own size is `natural` mm. `FromDpi` means
+    /// "real size" — for a PDF that is simply its size.
+    pub fn resolve_art(&self, natural: [f32; 2]) -> [f32; 2] {
+        match *self {
+            Self::FromDpi { .. } => natural,
+            Self::Width { width_mm } => [
+                width_mm,
+                width_mm * natural[1] / natural[0].max(f32::EPSILON),
+            ],
+            Self::Exact {
+                width_mm,
+                height_mm,
+            } => [width_mm, height_mm],
+        }
+    }
+
     /// Common real-world sizes for quick selection.
     pub const PRESETS: [(&'static str, f32, f32); 7] = [
         ("ID card / credit card (85.6 × 54)", 85.6, 54.0),
@@ -146,6 +174,9 @@ impl ItemSize {
 pub struct PrintItem {
     pub size: ItemSize,
     pub copies: u32,
+    /// Add as many further copies as fit without needing another sheet
+    /// (at least `copies`, never fewer).
+    pub fill: bool,
 }
 
 impl Default for PrintItem {
@@ -153,6 +184,7 @@ impl Default for PrintItem {
         Self {
             size: ItemSize::default(),
             copies: 1,
+            fill: false,
         }
     }
 }
@@ -166,6 +198,8 @@ impl Default for PrintItem {
 #[serde(default)]
 pub struct PrintLayout {
     pub items: Vec<PrintItem>,
+    /// `pdf_items[i]` configures the pages of the i-th connected PDF.
+    pub pdf_items: Vec<PrintItem>,
     pub paper: Paper,
     /// Paper size for [`Paper::Custom`], `[width, height]` in mm.
     pub custom_paper_mm: [f32; 2],
@@ -191,6 +225,7 @@ impl Default for PrintLayout {
     fn default() -> Self {
         Self {
             items: Vec::new(),
+            pdf_items: Vec::new(),
             paper: Paper::A4,
             custom_paper_mm: [210.0, 297.0],
             orientation: PageOrientation::Auto,
@@ -214,6 +249,18 @@ impl PrintLayout {
     }
 
     /// Settings for the i-th image, creating defaults up to it if needed.
+    /// Settings for the pages of the i-th connected PDF.
+    pub fn pdf_item(&self, index: usize) -> PrintItem {
+        self.pdf_items.get(index).cloned().unwrap_or_default()
+    }
+
+    pub fn pdf_item_mut(&mut self, index: usize) -> &mut PrintItem {
+        if self.pdf_items.len() <= index {
+            self.pdf_items.resize_with(index + 1, PrintItem::default);
+        }
+        &mut self.pdf_items[index]
+    }
+
     pub fn item_mut(&mut self, index: usize) -> &mut PrintItem {
         if self.items.len() <= index {
             self.items.resize_with(index + 1, PrintItem::default);
@@ -249,7 +296,17 @@ impl PrintLayout {
         if !positive(self.image_dpi) {
             return invalid("image_dpi", "must be positive");
         }
-        for (i, item) in self.items.iter().enumerate() {
+        let all = self
+            .items
+            .iter()
+            .map(|i| ("item", i))
+            .chain(self.pdf_items.iter().map(|i| ("PDF", i)));
+        for (i, (what, item)) in all.enumerate() {
+            let i = if what == "PDF" {
+                i - self.items.len()
+            } else {
+                i
+            };
             let ok = match item.size {
                 ItemSize::FromDpi { fallback_dpi } => positive(fallback_dpi),
                 ItemSize::Width { width_mm } => positive(width_mm),
@@ -261,7 +318,7 @@ impl PrintLayout {
             if !ok {
                 return Err(NodeError::InvalidParam {
                     name: "items",
-                    reason: format!("item {} needs a positive size", i + 1),
+                    reason: format!("{what} {} needs a positive size", i + 1),
                 });
             }
         }
@@ -270,44 +327,92 @@ impl PrintLayout {
 
     /// Lays out `images` and renders the PDF. Usable outside a graph.
     pub fn build(&self, images: &[&RasterImage]) -> Result<PdfDocument, NodeError> {
+        self.build_with_pdfs(images, &[])
+    }
+
+    /// Lays out `images` plus every non-blank page of `pdfs` (as vector art)
+    /// and renders the PDF.
+    pub fn build_with_pdfs(
+        &self,
+        images: &[&RasterImage],
+        pdfs: &[&PdfDocument],
+    ) -> Result<PdfDocument, NodeError> {
         self.validate()?;
-        let mut notes = Vec::new();
-        let (sizes, copies): (Vec<[f32; 2]>, Vec<u32>) = images
+        let loaded: Vec<lopdf::Document> = pdfs
             .iter()
             .enumerate()
-            .map(|(i, img)| {
-                let item = self.item(i);
-                let (size, note) = item.size.resolve(img);
-                if let Some(note) = note {
-                    notes.push(format!("Image {} {note}.", i + 1));
-                }
-                (size, item.copies)
+            .map(|(i, d)| {
+                lopdf::Document::load_mem(&d.bytes)
+                    .map_err(|e| NodeError::Other(format!("PDF {} cannot be read ({e})", i + 1)))
             })
-            .unzip();
+            .collect::<Result<_, _>>()?;
+
+        let mut notes = Vec::new();
+        let mut pieces: Vec<Piece<'_>> = Vec::new();
+        for (i, img) in images.iter().enumerate() {
+            let item = self.item(i);
+            let (size, note) = item.size.resolve(img);
+            if let Some(note) = note {
+                notes.push(format!("Image {} {note}.", i + 1));
+            }
+            pieces.push(Piece {
+                art: Artwork::Image(img),
+                size,
+                item,
+                label: format!("Image {}", i + 1),
+            });
+        }
+        for (d, (doc, source)) in loaded.iter().zip(pdfs).enumerate() {
+            let item = self.pdf_item(d);
+            let pages = doc.get_pages();
+            let many = pages.len() > 1;
+            for (p, &page) in pages.values().enumerate() {
+                let Some(art) = pdf_art(doc, page, source.page_info.get(p)) else {
+                    continue; // blank page
+                };
+                let natural = art.display_size_pt().map(|pt| pt / PT_PER_MM);
+                pieces.push(Piece {
+                    size: item.size.resolve_art(natural),
+                    art: Artwork::Pdf(art),
+                    item: item.clone(),
+                    label: if many {
+                        format!("PDF {} page {}", d + 1, p + 1)
+                    } else {
+                        format!("PDF {}", d + 1)
+                    },
+                });
+            }
+        }
+        if pieces.is_empty() {
+            return Err(NodeError::InvalidParam {
+                name: "pdfs",
+                reason: "the connected PDFs have no visible content".into(),
+            });
+        }
+
+        let sizes: Vec<[f32; 2]> = pieces.iter().map(|p| p.size).collect();
+        let mut copies: Vec<u32> = pieces
+            .iter()
+            .map(|p| {
+                if p.item.fill {
+                    p.item.copies.max(1)
+                } else {
+                    p.item.copies
+                }
+            })
+            .collect();
         if copies.iter().all(|&c| c == 0) {
             return Err(NodeError::InvalidParam {
                 name: "items",
                 reason: "every item has 0 copies".into(),
             });
         }
-
-        let packing = pack::pack(&pack::Request {
-            sizes: &sizes,
-            copies: &copies,
-            paper: self.paper_mm(),
-            orientation: match self.orientation {
-                PageOrientation::Auto => Orientation::Auto,
-                PageOrientation::Portrait => Orientation::Portrait,
-                PageOrientation::Landscape => Orientation::Landscape,
-            },
-            margin: self.margin_mm,
-            gap: self.gap_mm,
-            allow_rotation: self.allow_rotation,
-        })
-        .ok_or_else(|| NodeError::InvalidParam {
-            name: "margin_mm",
-            reason: "the margins leave no printable area".into(),
-        })?;
+        let pack_with = |copies: &[u32]| self.pack(&sizes, copies);
+        let base = pack_with(&copies).ok_or_else(no_printable_area)?;
+        for i in (0..pieces.len()).filter(|&i| pieces[i].item.fill) {
+            copies[i] = max_copies_without_new_sheet(i, &copies, base.pages, &pack_with);
+        }
+        let packing = pack_with(&copies).ok_or_else(no_printable_area)?;
 
         let scaled: Vec<[f32; 2]> = sizes
             .iter()
@@ -317,16 +422,17 @@ impl PrintLayout {
         for (i, &k) in packing.scale.iter().enumerate() {
             if k < 0.999 && copies[i] > 0 {
                 notes.push(format!(
-                    "Image {} was shrunk to {:.0}% to fit on the paper.",
-                    i + 1,
+                    "{} was shrunk to {:.0}% to fit on the paper.",
+                    pieces[i].label,
                     k * 100.0
                 ));
             }
         }
 
+        let art: Vec<Artwork<'_>> = pieces.into_iter().map(|p| p.art).collect();
         let bytes = pdf::write(
             &packing,
-            images,
+            &art,
             &scaled,
             &pdf::Options {
                 dpi: self.image_dpi,
@@ -358,6 +464,23 @@ impl PrintLayout {
             bytes,
             pages_mm: vec![packing.page; packing.pages],
             summary,
+            page_info: Vec::new(),
+        })
+    }
+
+    fn pack(&self, sizes: &[[f32; 2]], copies: &[u32]) -> Option<Packing> {
+        pack::pack(&pack::Request {
+            sizes,
+            copies,
+            paper: self.paper_mm(),
+            orientation: match self.orientation {
+                PageOrientation::Auto => Orientation::Auto,
+                PageOrientation::Portrait => Orientation::Portrait,
+                PageOrientation::Landscape => Orientation::Landscape,
+            },
+            margin: self.margin_mm,
+            gap: self.gap_mm,
+            allow_rotation: self.allow_rotation,
         })
     }
 
@@ -385,6 +508,84 @@ impl PrintLayout {
     }
 }
 
+/// One printable piece before packing.
+struct Piece<'a> {
+    art: Artwork<'a>,
+    size: [f32; 2],
+    item: PrintItem,
+    label: String,
+}
+
+const PT_PER_MM: f32 = 72.0 / 25.4;
+
+fn no_printable_area() -> NodeError {
+    NodeError::InvalidParam {
+        name: "margin_mm",
+        reason: "the margins leave no printable area".into(),
+    }
+}
+
+/// The artwork box of a source page: the analysed content box when the PDF
+/// came from PDF Input, otherwise the page's visible area (e.g. the output
+/// of another Print Layout). `None` for blank pages.
+fn pdf_art<'a>(
+    doc: &'a lopdf::Document,
+    page: lopdf::ObjectId,
+    info: Option<&PdfPageInfo>,
+) -> Option<PdfArt<'a>> {
+    use crate::pdf_input::analyze::{inherited, num, rect};
+    let (bbox, rotation) = match info {
+        Some(info) => (info.content_box?, info.rotation),
+        None => {
+            let media = inherited(doc, page, b"MediaBox").and_then(|o| rect(doc, o))?;
+            let crop = inherited(doc, page, b"CropBox")
+                .and_then(|o| rect(doc, o))
+                .and_then(|c| c.intersect(&media))
+                .unwrap_or(media);
+            let rotation = inherited(doc, page, b"Rotate")
+                .and_then(num)
+                .map_or(0, |r| (r as i64).rem_euclid(360) as u16 / 90 * 90);
+            (crop.to_array(), rotation)
+        }
+    };
+    let [x0, y0, x1, y1] = bbox;
+    (x1 - x0 >= 1.0 && y1 - y0 >= 1.0).then_some(PdfArt {
+        doc,
+        page,
+        bbox,
+        rotation,
+    })
+}
+
+/// Largest copy count for piece `i` that keeps the layout on `pages` sheets.
+/// Grows exponentially, then bisects: ~20 packings even for hundreds of copies.
+fn max_copies_without_new_sheet(
+    i: usize,
+    copies: &[u32],
+    pages: usize,
+    pack: &impl Fn(&[u32]) -> Option<Packing>,
+) -> u32 {
+    const LIMIT: u32 = 2000;
+    let fits = |n: u32| {
+        let mut c = copies.to_vec();
+        c[i] = n;
+        pack(&c).is_some_and(|p| p.pages <= pages)
+    };
+    let mut good = copies[i];
+    let mut step = good.max(1);
+    while good < LIMIT && fits(good + step) {
+        good += step;
+        step *= 2;
+    }
+    // The answer lies in (good, good + step).
+    let (mut lo, mut hi) = (good, (good + step).min(LIMIT + 1));
+    while hi - lo > 1 {
+        let mid = lo + (hi - lo) / 2;
+        if fits(mid) { lo = mid } else { hi = mid }
+    }
+    lo
+}
+
 impl Node for PrintLayout {
     fn kind(&self) -> &'static str {
         Self::KIND
@@ -401,7 +602,23 @@ impl Node for PrintLayout {
     fn evaluate(&self, inputs: &Inputs, ctx: &EvalContext) -> Result<Vec<Value>, NodeError> {
         let images = inputs.images(INPUT)?;
         let images: Vec<&RasterImage> = images.iter().map(|i| i.as_ref()).collect();
-        let doc = self.build(&images)?;
+        let pdfs = inputs
+            .all(PDF_INPUT)
+            .iter()
+            .map(|v| {
+                v.as_document()
+                    .map(|d| d.as_ref())
+                    .ok_or_else(|| NodeError::InputType {
+                        port: PDF_INPUT.into(),
+                        expected: docforge_core::PortType::Document,
+                        actual: v.port_type(),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if images.is_empty() && pdfs.is_empty() {
+            return Err(NodeError::MissingInput(format!("{INPUT}` or `{PDF_INPUT}")));
+        }
+        let doc = self.build_with_pdfs(&images, &pdfs)?;
         if self.auto_save && !self.path.as_os_str().is_empty() {
             self.save(&doc, ctx)?;
         }
@@ -447,10 +664,12 @@ mod tests {
                 PrintItem {
                     size: ItemSize::default(),
                     copies: 2,
+                    fill: false,
                 },
                 PrintItem {
                     size: ItemSize::Width { width_mm: 105.0 },
                     copies: 1,
+                    fill: false,
                 },
             ],
             ..PrintLayout::default()
@@ -475,6 +694,7 @@ mod tests {
                     height_mm: 54.0,
                 },
                 copies: 12,
+                fill: false,
             }],
             ..PrintLayout::default()
         };
@@ -536,6 +756,7 @@ mod tests {
                     height_mm: 54.0,
                 },
                 copies: 1,
+                fill: false,
             }],
             orientation: PageOrientation::Portrait,
             ..PrintLayout::default()
@@ -637,5 +858,307 @@ mod tests {
             back.node_as::<PrintLayout>(print),
             g.node_as::<PrintLayout>(print)
         );
+    }
+
+    // ----- vector artwork from PDFs ------------------------------------------
+
+    use lopdf::{Dictionary, Document, Object, Stream, dictionary};
+
+    /// A 200 × 200 pt one-page PDF with `content`, optionally rotated.
+    fn source_pdf(content: &str, rotate: i64) -> Vec<u8> {
+        let mut doc = Document::with_version("1.7");
+        let pages_id = doc.new_object_id();
+        let content_id =
+            doc.add_object(Stream::new(Dictionary::new(), content.as_bytes().to_vec()));
+        let page = doc.add_object(dictionary! {
+            "Type" => "Page", "Parent" => pages_id, "Contents" => content_id, "Rotate" => rotate,
+            "MediaBox" => vec![0.into(), 0.into(), 200.into(), 200.into()],
+            "Resources" => Dictionary::new(),
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages", "Count" => 1, "Kids" => vec![page.into()],
+            }),
+        );
+        let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", catalog);
+        let mut out = Vec::new();
+        doc.save_to(&mut out).unwrap();
+        out
+    }
+
+    /// Loads `bytes` through PDF Input (analysed and cropped to content).
+    fn art(bytes: &[u8]) -> PdfDocument {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("art.pdf");
+        std::fs::write(&path, bytes).unwrap();
+        crate::PdfInput::new(&path)
+            .load(&EvalContext::new())
+            .unwrap()
+    }
+
+    /// Every `cm … Do` on the first page: (xobject name, art box placed, in mm).
+    fn placed(doc: &PdfDocument) -> Vec<(String, [f32; 4])> {
+        let pdf = Document::load_mem(&doc.bytes).unwrap();
+        let page = *pdf.get_pages().values().next().unwrap();
+        let ops = lopdf::content::Content::decode(&pdf.get_page_content(page))
+            .unwrap()
+            .operations;
+        let (resources, _) = pdf.get_page_resources(page).unwrap();
+        let xobjects = resources
+            .unwrap()
+            .get(b"XObject")
+            .unwrap()
+            .as_dict()
+            .unwrap();
+        let mut out = Vec::new();
+        for pair in ops.windows(2) {
+            if pair[0].operator != "cm" || pair[1].operator != "Do" {
+                continue;
+            }
+            let m: Vec<f64> = pair[0]
+                .operands
+                .iter()
+                .map(|o| o.as_float().unwrap() as f64)
+                .collect();
+            let m = crate::pdf_input::geometry::Matrix::new([m[0], m[1], m[2], m[3], m[4], m[5]]);
+            let name = pair[1].operands[0].as_name().unwrap();
+            let id = xobjects.get(name).unwrap().as_reference().unwrap();
+            let dict = &pdf.get_object(id).unwrap().as_stream().unwrap().dict;
+            // Images draw the unit square; forms draw their BBox.
+            let src = match dict.get(b"BBox") {
+                Ok(b) => {
+                    let v: Vec<f64> = b
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|o| o.as_float().unwrap() as f64)
+                        .collect();
+                    crate::pdf_input::geometry::Bbox::from_rect([v[0], v[1], v[2], v[3]])
+                }
+                Err(_) => crate::pdf_input::geometry::Bbox::from_rect([0.0, 0.0, 1.0, 1.0]),
+            };
+            let r = crate::pdf_input::geometry::Bbox::transformed(&src, &m);
+            let mm = |v: f64| (v * 25.4 / 72.0) as f32;
+            out.push((
+                String::from_utf8_lossy(name).into_owned(),
+                [mm(r.x0), mm(r.y0), mm(r.x1), mm(r.y1)],
+            ));
+        }
+        out
+    }
+
+    fn size([x0, y0, x1, y1]: [f32; 4]) -> [f32; 2] {
+        [x1 - x0, y1 - y0]
+    }
+
+    #[test]
+    fn pdf_art_prints_at_its_real_size_from_one_shared_form() {
+        // 72 × 36 pt of art (25.4 × 12.7 mm) somewhere on a larger page.
+        let src = art(&source_pdf("0 g 30 40 72 36 re f", 0));
+        let layout = PrintLayout {
+            pdf_items: vec![PrintItem {
+                copies: 3,
+                ..PrintItem::default()
+            }],
+            allow_rotation: false,
+            ..PrintLayout::default()
+        };
+        let doc = layout.build_with_pdfs(&[], &[&src]).unwrap();
+        let pieces = placed(&doc);
+        assert_eq!(pieces.len(), 3);
+        assert!(
+            pieces.iter().all(|(name, _)| name == "Fm0"),
+            "all copies use one form"
+        );
+        for (_, r) in &pieces {
+            let [w, h] = size(*r);
+            assert!(
+                (w - 25.4).abs() < 0.01 && (h - 12.7).abs() < 0.01,
+                "{w} × {h} mm"
+            );
+            // Inside the 10 mm margins.
+            assert!(r[0] >= 10.0 - 0.01 && r[1] >= 10.0 - 0.01, "{r:?}");
+        }
+        let pdf = Document::load_mem(&doc.bytes).unwrap();
+        let forms = pdf.objects.values().filter(|o| {
+            o.as_stream().is_ok_and(|s| {
+                s.dict
+                    .get(b"Subtype")
+                    .and_then(|v| v.as_name())
+                    .is_ok_and(|n| n == b"Form")
+            })
+        });
+        assert_eq!(forms.count(), 1);
+    }
+
+    #[test]
+    fn pdf_art_can_be_resized_and_respects_page_rotation() {
+        let src = art(&source_pdf("0 g 30 40 72 36 re f", 0));
+        let layout = PrintLayout {
+            pdf_items: vec![PrintItem {
+                size: ItemSize::Width { width_mm: 50.8 },
+                ..PrintItem::default()
+            }],
+            allow_rotation: false,
+            ..PrintLayout::default()
+        };
+        let [w, h] = size(placed(&layout.build_with_pdfs(&[], &[&src]).unwrap())[0].1);
+        assert!(
+            (w - 50.8).abs() < 0.01 && (h - 25.4).abs() < 0.01,
+            "{w} × {h}"
+        );
+
+        // The source page is displayed rotated 90°: its art is 36 × 72 pt as seen.
+        let rotated = art(&source_pdf("0 g 30 40 72 36 re f", 90));
+        let layout = PrintLayout {
+            allow_rotation: false,
+            ..PrintLayout::default()
+        };
+        let [w, h] = size(placed(&layout.build_with_pdfs(&[], &[&rotated]).unwrap())[0].1);
+        assert!(
+            (w - 12.7).abs() < 0.01 && (h - 25.4).abs() < 0.01,
+            "{w} × {h}"
+        );
+    }
+
+    #[test]
+    fn fill_sheet_adds_copies_until_another_sheet_would_be_needed() {
+        // 9 ID cards is the A4 maximum with 10 mm margins and 4 mm gaps.
+        let layout = PrintLayout {
+            items: vec![PrintItem {
+                size: ItemSize::Exact {
+                    width_mm: 85.6,
+                    height_mm: 54.0,
+                },
+                fill: true,
+                ..PrintItem::default()
+            }],
+            ..PrintLayout::default()
+        };
+        let doc = layout.build(&[&id_card()]).unwrap();
+        assert_eq!(doc.pages_mm.len(), 1);
+        assert!(
+            doc.summary[0].starts_with("9 pieces on 1 A4 page"),
+            "{:?}",
+            doc.summary
+        );
+
+        // With other pieces present, filling uses only the space left over.
+        let src = art(&source_pdf("0 g 0 0 150 150 re f", 0)); // 52.9 mm square
+        let layout = PrintLayout {
+            items: vec![PrintItem {
+                copies: 2,
+                ..PrintItem::default()
+            }],
+            pdf_items: vec![PrintItem {
+                fill: true,
+                ..PrintItem::default()
+            }],
+            ..PrintLayout::default()
+        };
+        let doc = layout.build_with_pdfs(&[&id_card()], &[&src]).unwrap();
+        assert_eq!(doc.pages_mm.len(), 1);
+        let squares = placed(&doc)
+            .iter()
+            .filter(|(n, _)| n.starts_with("Fm"))
+            .count();
+        assert!(
+            squares >= 4,
+            "{squares} squares beside 2 cards: {:?}",
+            doc.summary
+        );
+    }
+
+    #[test]
+    fn images_and_pdfs_share_sheets_and_layouts_can_be_nested() {
+        let src = art(&source_pdf("0 g 30 40 72 36 re f", 0));
+        let first = PrintLayout {
+            pdf_items: vec![PrintItem {
+                copies: 4,
+                ..PrintItem::default()
+            }],
+            ..PrintLayout::default()
+        }
+        .build_with_pdfs(&[&id_card()], &[&src])
+        .unwrap();
+        let names: Vec<String> = placed(&first).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names.iter().filter(|n| n.starts_with("Im")).count(), 1);
+        assert_eq!(names.iter().filter(|n| n.starts_with("Fm")).count(), 4);
+
+        // A generated sheet (no page analysis) can itself be a piece: the
+        // whole A4 page, shrunk to fit inside the margins of another A4.
+        let nested = PrintLayout::default()
+            .build_with_pdfs(&[], &[&first])
+            .unwrap();
+        let (_, r) = &placed(&nested)[0];
+        let [w, h] = size(*r);
+        assert!(
+            (w / h - 210.0 / 297.0).abs() < 0.001,
+            "keeps A4 proportions: {w} × {h}"
+        );
+        assert!(
+            nested
+                .summary
+                .iter()
+                .any(|s| s.contains("PDF 1 was shrunk")),
+            "{:?}",
+            nested.summary
+        );
+    }
+
+    #[test]
+    fn blank_pdfs_and_missing_inputs_are_reported() {
+        let blank = art(&source_pdf("1 g 0 0 200 200 re f", 0));
+        let err = PrintLayout::default()
+            .build_with_pdfs(&[], &[&blank])
+            .unwrap_err();
+        assert!(err.to_string().contains("no visible content"), "{err}");
+
+        let mut g = Graph::new();
+        let layout = g.add(PrintLayout::default());
+        g.evaluate(&EvalContext::new());
+        let Some(docforge_core::NodeStatus::Failed(err)) = g.status(layout) else {
+            panic!("expected failure");
+        };
+        assert_eq!(
+            err.to_string(),
+            "required input `images` or `pdfs` is not connected"
+        );
+    }
+
+    #[test]
+    fn pdf_input_feeds_print_layout_in_a_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("art.pdf");
+        std::fs::write(&path, source_pdf("0 g 30 40 72 36 re f", 0)).unwrap();
+        let mut g = Graph::new();
+        let input = g.add(crate::PdfInput::new(&path));
+        let print = g.add(PrintLayout {
+            pdf_items: vec![PrintItem {
+                copies: 2,
+                ..PrintItem::default()
+            }],
+            ..PrintLayout::default()
+        });
+        g.connect(input, crate::pdf_input::OUTPUT, print, PDF_INPUT)
+            .unwrap();
+        let report = g.evaluate(&EvalContext::new());
+        assert!(report.is_ok(), "{:?}", report.failed);
+        let doc = g.output(print, OUTPUT).unwrap().as_document().unwrap();
+        assert!(doc.summary[0].starts_with("2 pieces"), "{:?}", doc.summary);
+
+        // Settings survive saving, and old projects without `pdf_items`/`fill` still load.
+        let back = Graph::from_json(&g.to_json().unwrap(), &crate::registry()).unwrap();
+        assert_eq!(
+            back.node_as::<PrintLayout>(print),
+            g.node_as::<PrintLayout>(print)
+        );
+        let old: PrintLayout = serde_json::from_str(
+            r#"{"items":[{"size":{"mode":"from_dpi","fallback_dpi":300.0},"copies":2}]}"#,
+        )
+        .unwrap();
+        assert!(old.pdf_items.is_empty() && !old.items[0].fill);
     }
 }

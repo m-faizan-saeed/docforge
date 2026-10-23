@@ -6,7 +6,10 @@ use docforge_core::{NodeError, RasterImage};
 use image::{ExtendedColorType, ImageEncoder, codecs::jpeg::JpegEncoder, imageops::FilterType};
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
 
-use super::pack::{Packing, Rect};
+use super::{
+    art::{Imported, PdfArt, import_page_as_form},
+    pack::{Packing, Rect},
+};
 
 /// Points per millimetre.
 const PT: f32 = 72.0 / 25.4;
@@ -32,23 +35,36 @@ pub struct Options {
     pub title: String,
 }
 
+/// What a piece shows.
+pub enum Artwork<'a> {
+    Image(&'a RasterImage),
+    /// A page of a PDF, kept as vector graphics.
+    Pdf(PdfArt<'a>),
+}
+
 /// Builds the PDF. `sizes` are the items' final (scaled) sizes in mm.
 pub fn write(
     packing: &Packing,
-    images: &[&RasterImage],
+    pieces: &[Artwork<'_>],
     sizes: &[[f32; 2]],
     opts: &Options,
 ) -> Result<Vec<u8>, NodeError> {
     let mut doc = Document::with_version("1.7");
     let pages_id = doc.new_object_id();
 
-    // One image object per item that is actually placed, shared by all copies.
-    let mut xobjects: Vec<Option<ObjectId>> = vec![None; images.len()];
+    // One image/form object per item that is actually placed, shared by all copies.
+    let mut xobjects: Vec<Option<ObjectId>> = vec![None; pieces.len()];
+    let mut imported = Imported::default();
     for placement in &packing.placements {
         let slot = &mut xobjects[placement.item];
         if slot.is_none() {
-            let stream = image_stream(images[placement.item], sizes[placement.item], opts)?;
-            *slot = Some(doc.add_object(stream));
+            *slot = Some(match &pieces[placement.item] {
+                Artwork::Image(img) => {
+                    let stream = image_stream(img, sizes[placement.item], opts)?;
+                    doc.add_object(stream)
+                }
+                Artwork::Pdf(art) => import_page_as_form(&mut doc, art, &mut imported),
+            });
         }
     }
 
@@ -63,16 +79,33 @@ pub fn write(
             .filter(|p| p.page == page)
             .collect();
         for p in &on_page {
-            let name = format!("Im{}", p.item);
-            resources.set(name.clone(), xobjects[p.item].expect("created above"));
             let r = to_pdf(&p.rect, page_h);
-            // Map the image's unit square onto the piece; rotated pieces are
-            // turned 90° counter-clockwise.
-            let m = if p.rotated {
-                [0.0, r.h, -r.w, 0.0, r.x + r.w, r.y]
-            } else {
-                [r.w, 0.0, 0.0, r.h, r.x, r.y]
+            let (name, m) = match &pieces[p.item] {
+                // Map the image's unit square onto the piece; rotated pieces
+                // are turned 90° counter-clockwise.
+                Artwork::Image(_) => (
+                    format!("Im{}", p.item),
+                    if p.rotated {
+                        [0.0, r.h, -r.w, 0.0, r.x + r.w, r.y]
+                    } else {
+                        [r.w, 0.0, 0.0, r.h, r.x, r.y]
+                    },
+                ),
+                Artwork::Pdf(art) => {
+                    let name = format!("Fm{}", p.item);
+                    resources.set(name.clone(), xobjects[p.item].expect("created above"));
+                    // Six decimals: the matrix carries scale factors, where
+                    // rounding would visibly shift large art.
+                    let t = art.placement(&r, p.rotated);
+                    let _ = writeln!(
+                        content,
+                        "q {:.6} {:.6} {:.6} {:.6} {:.4} {:.4} cm /{name} Do Q",
+                        t.a, t.b, t.c, t.d, t.e, t.f
+                    );
+                    continue;
+                }
             };
+            resources.set(name.clone(), xobjects[p.item].expect("created above"));
             let _ = writeln!(
                 content,
                 "q {} {} {} {} {} {} cm /{name} Do Q",

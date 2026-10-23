@@ -5,22 +5,39 @@
 
 use std::path::{Path, PathBuf};
 
-use docforge_core::{Graph, NodeId, NodeRegistry, NodeType as _};
+use std::sync::Arc;
+
+use crate::thumbs::{Thumb, Thumbnails};
+use docforge_core::{Graph, NodeId, NodeRegistry, NodeType as _, PdfDocument};
 use docforge_nodes::{
-    Effect, EnhanceImage, IfExists, InputImage, OutputImage, PngCompression, PrintLayout,
+    Effect, EnhanceImage, IfExists, InputImage, OutputImage, PdfInput, PngCompression, PrintLayout,
     SaveFormat, Step,
     enhance::{
         AutoCrop, BlackAndWhite, BrightnessContrast, Crop, DetectDocument, Line, MagicColor,
         Rectangle, Rotate, Sharpen, Watermark,
     },
-    print::{self, CutMarks, ItemSize, PageOrientation, Paper},
+    pdf_input::{Bounds, images},
+    print::{self, CutMarks, ItemSize, PageOrientation, Paper, PrintItem},
 };
 use eframe::egui::{self, Color32, DragValue, Grid, RichText, Slider, TextEdit, Ui};
 
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp", "gif"];
 
 /// Edits the node's parameters. Returns whether anything changed.
-pub fn node_params(ui: &mut Ui, graph: &mut Graph, id: NodeId, registry: &NodeRegistry) -> bool {
+/// What some editors need beyond the node itself.
+pub struct Extras<'a> {
+    /// The node's last PDF output, if any (PDF Input shows its images).
+    pub pdf: Option<Arc<PdfDocument>>,
+    pub thumbs: &'a mut Thumbnails,
+}
+
+pub fn node_params(
+    ui: &mut Ui,
+    graph: &mut Graph,
+    id: NodeId,
+    registry: &NodeRegistry,
+    extras: Extras<'_>,
+) -> bool {
     let Some(kind) = graph.node(id).map(|n| n.kind()) else {
         return false;
     };
@@ -35,29 +52,35 @@ pub fn node_params(ui: &mut Ui, graph: &mut Graph, id: NodeId, registry: &NodeRe
         k if k == EnhanceImage::KIND => graph
             .edit_node::<EnhanceImage, _>(id, |n| enhance_image(ui, n))
             .unwrap_or(false),
+        k if k == PdfInput::KIND => graph
+            .edit_node::<PdfInput, _>(id, |n| pdf_input(ui, n, salt, extras))
+            .unwrap_or(false),
         k if k == PrintLayout::KIND => {
             // Name each piece after the node feeding it, in connection order.
-            let sources: Vec<String> = graph
-                .edges()
-                .iter()
-                .filter(|e| e.to.node == id && e.to.port == print::INPUT)
-                .map(|e| {
-                    let label = graph.meta(e.from.node).and_then(|m| m.label.clone());
-                    let kind = graph
-                        .node(e.from.node)
-                        .map(|n| n.kind())
-                        .unwrap_or_default();
-                    label.unwrap_or_else(|| {
-                        format!(
-                            "{} {}",
-                            crate::canvas::display_name(registry, kind),
-                            e.from.node
-                        )
+            let sources = |port: &str| -> Vec<String> {
+                graph
+                    .edges()
+                    .iter()
+                    .filter(|e| e.to.node == id && e.to.port == port)
+                    .map(|e| {
+                        let label = graph.meta(e.from.node).and_then(|m| m.label.clone());
+                        let kind = graph
+                            .node(e.from.node)
+                            .map(|n| n.kind())
+                            .unwrap_or_default();
+                        label.unwrap_or_else(|| {
+                            format!(
+                                "{} {}",
+                                crate::canvas::display_name(registry, kind),
+                                e.from.node
+                            )
+                        })
                     })
-                })
-                .collect();
+                    .collect()
+            };
+            let (images, pdfs) = (sources(print::INPUT), sources(print::PDF_INPUT));
             graph
-                .edit_node::<PrintLayout, _>(id, |n| print_layout(ui, n, salt, &sources))
+                .edit_node::<PrintLayout, _>(id, |n| print_layout(ui, n, salt, &images, &pdfs))
                 .unwrap_or(false)
         }
         _ => raw_json(ui, graph, id, registry),
@@ -218,35 +241,227 @@ fn if_exists_name(p: IfExists) -> &'static str {
     }
 }
 
+// ----- PDF Input ---------------------------------------------------------------
+
+fn pdf_input(ui: &mut Ui, node: &mut PdfInput, salt: u64, extras: Extras<'_>) -> bool {
+    let mut changed = false;
+    ui.label("PDF file");
+    ui.horizontal(|ui| {
+        changed |= path_field(
+            ui,
+            ("pdf_input_path", salt),
+            &mut node.path,
+            "Choose a PDF…",
+        );
+        if ui.button("Browse…").clicked()
+            && let Some(path) = rfd::FileDialog::new()
+                .add_filter("PDF", &["pdf"])
+                .set_directory(start_dir(&node.path))
+                .pick_file()
+        {
+            node.path = path;
+            changed = true;
+        }
+    });
+    ui.add_space(4.0);
+    changed |= ui
+        .checkbox(&mut node.crop_to_content, "Crop pages to their content")
+        .on_hover_text("Off: the PDF passes through unchanged and the content box is only reported")
+        .changed();
+    Grid::new("pdf_input_grid")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Content box");
+            egui::ComboBox::from_id_salt("bounds")
+                .selected_text(bounds_name(node.bounds))
+                .show_ui(ui, |ui| {
+                    for b in [Bounds::Content, Bounds::CropBox, Bounds::MediaBox] {
+                        changed |= ui
+                            .selectable_value(&mut node.bounds, b, bounds_name(b))
+                            .changed();
+                    }
+                });
+            ui.end_row();
+            if node.bounds == Bounds::Content {
+                ui.label("Padding");
+                changed |= ui
+                    .add(
+                        DragValue::new(&mut node.padding_mm)
+                            .range(0.0..=50.0)
+                            .speed(0.1)
+                            .suffix(" mm"),
+                    )
+                    .changed();
+                ui.end_row();
+            }
+        });
+    if node.bounds == Bounds::Content {
+        changed |= ui
+            .checkbox(&mut node.ignore_white_fills, "Ignore white areas")
+            .on_hover_text("White-filled shapes (e.g. page backgrounds) don't count as content")
+            .changed();
+    }
+    changed |= embedded_images(ui, node, extras);
+    changed
+}
+
+/// Thumbnails of every embedded image with a checkbox each; ticked images
+/// become output ports. Returns whether the selection changed.
+fn embedded_images(ui: &mut Ui, node: &mut PdfInput, extras: Extras<'_>) -> bool {
+    ui.add_space(6.0);
+    ui.strong("Embedded images");
+    let Some(doc) = extras.pdf else {
+        ui.label(RichText::new("Load a PDF to see its images.").weak());
+        return false;
+    };
+    let entries = images::list(&doc);
+    let inline = images::inline_count(&doc);
+    if entries.is_empty() {
+        ui.label(RichText::new("This PDF has no embedded images.").weak());
+    }
+    if inline > 0 {
+        ui.label(RichText::new(format!("{inline} inline image(s) cannot be extracted.")).weak());
+    }
+    if entries.is_empty() {
+        return false;
+    }
+
+    let mut selected: Vec<String> = node.selected_images.clone();
+    ui.horizontal(|ui| {
+        ui.label(format!("{} of {} selected", selected.len(), entries.len()));
+        if ui.small_button("All").clicked() {
+            selected = entries.iter().map(|e| e.key.clone()).collect();
+        }
+        if ui.small_button("None").clicked() {
+            selected.clear();
+        }
+    });
+    ui.label(
+        RichText::new("Each ticked image becomes an output of this node.")
+            .weak()
+            .small(),
+    );
+
+    let thumbs = extras.thumbs.get(ui.ctx(), &doc);
+    let side = 96.0;
+    let columns = ((ui.available_width() / (side + 24.0)).floor() as usize).max(1);
+    Grid::new("embedded_images")
+        .num_columns(columns)
+        .spacing([8.0, 8.0])
+        .show(ui, |ui| {
+            for (i, entry) in entries.iter().enumerate() {
+                ui.vertical(|ui| {
+                    ui.set_width(side + 16.0);
+                    let thumb = thumbs.and_then(|t| t.iter().find(|t| t.key == entry.key));
+                    match thumb {
+                        Some(Thumb {
+                            texture: Some(tex), ..
+                        }) => {
+                            ui.add(
+                                egui::Image::from_texture(egui::load::SizedTexture::from_handle(
+                                    tex,
+                                ))
+                                .max_size(egui::vec2(side, side)),
+                            );
+                        }
+                        Some(Thumb {
+                            error: Some(err), ..
+                        }) => {
+                            ui.colored_label(Color32::LIGHT_RED, "Cannot decode")
+                                .on_hover_text(err);
+                        }
+                        _ => {
+                            ui.add_sized([side, side], egui::Spinner::new());
+                        }
+                    }
+                    let mut on = selected.contains(&entry.key);
+                    if ui.checkbox(&mut on, entry.key.as_str()).changed() {
+                        if on {
+                            selected.push(entry.key.clone());
+                        } else {
+                            selected.retain(|k| k != &entry.key);
+                        }
+                    }
+                    ui.label(
+                        RichText::new(format!(
+                            "{} × {} px · {}",
+                            entry.info.width_px,
+                            entry.info.height_px,
+                            entry.info.filter.as_deref().unwrap_or("raw")
+                        ))
+                        .weak()
+                        .small(),
+                    );
+                });
+                if (i + 1) % columns == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+
+    if selected == node.selected_images {
+        return false;
+    }
+    // Ports follow document order. Keys no longer in the PDF are dropped only
+    // when the user edits; until then the node reports them as missing.
+    node.selected_images = entries
+        .iter()
+        .map(|e| e.key.clone())
+        .filter(|k| selected.contains(k))
+        .collect();
+    true
+}
+
+fn bounds_name(b: Bounds) -> &'static str {
+    match b {
+        Bounds::Content => "Detected content",
+        Bounds::CropBox => "Visible page (CropBox)",
+        Bounds::MediaBox => "Full page (MediaBox)",
+    }
+}
+
 // ----- Print Layout ----------------------------------------------------------
 
-fn print_layout(ui: &mut Ui, node: &mut PrintLayout, salt: u64, sources: &[String]) -> bool {
+fn print_layout(
+    ui: &mut Ui,
+    node: &mut PrintLayout,
+    salt: u64,
+    images: &[String],
+    pdfs: &[String],
+) -> bool {
     let mut changed = false;
 
     ui.strong("Pieces");
-    if sources.is_empty() {
+    if images.is_empty() && pdfs.is_empty() {
         ui.label(
-            RichText::new("Connect images to the “images” input; each becomes a piece.").weak(),
+            RichText::new(
+                "Connect images to “images” or PDFs to “pdfs”; each image or PDF page becomes a piece.",
+            )
+            .weak(),
         );
     }
-    for (i, source) in sources.iter().enumerate() {
+    for (i, source) in images.iter().enumerate() {
         let mut item = node.item(i);
-        let before = item.clone();
-        ui.push_id(("piece", i), |ui| {
-            egui::Frame::group(ui.style()).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(format!("{}. {source}", i + 1)).strong());
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add(DragValue::new(&mut item.copies).range(0..=500).suffix(" ×"));
-                        ui.label("Copies");
-                    });
-                });
-                item_size(ui, &mut item.size);
-            });
-        });
-        if item != before {
+        if piece_card(
+            ui,
+            ("piece", i),
+            &format!("{}. {source}", i + 1),
+            &mut item,
+            false,
+        ) {
             *node.item_mut(i) = item;
+            changed = true;
+        }
+    }
+    if !pdfs.is_empty() {
+        ui.label(RichText::new("PDF artwork (vector)").weak());
+    }
+    for (i, source) in pdfs.iter().enumerate() {
+        let mut item = node.pdf_item(i);
+        let label = format!("PDF {}. {source}", i + 1);
+        if piece_card(ui, ("pdf_piece", i), &label, &mut item, true) {
+            *node.pdf_item_mut(i) = item;
             changed = true;
         }
     }
@@ -385,7 +600,39 @@ fn print_layout(ui: &mut Ui, node: &mut PrintLayout, salt: u64, sources: &[Strin
     changed
 }
 
-fn item_size(ui: &mut Ui, size: &mut ItemSize) {
+/// Settings card for one image or PDF piece. Returns whether it changed.
+fn piece_card(
+    ui: &mut Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    title: &str,
+    item: &mut PrintItem,
+    is_pdf: bool,
+) -> bool {
+    let before = item.clone();
+    ui.push_id(salt, |ui| {
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(title).strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(DragValue::new(&mut item.copies).range(0..=500).suffix(" ×"));
+                    ui.label(if item.fill { "At least" } else { "Copies" });
+                });
+            });
+            ui.checkbox(&mut item.fill, "Fill sheet")
+                .on_hover_text("Add as many copies as fit without needing another sheet");
+            item_size(ui, &mut item.size, is_pdf);
+        });
+    });
+    *item != before
+}
+
+fn item_size(ui: &mut Ui, size: &mut ItemSize, is_pdf: bool) {
+    let real = if is_pdf {
+        "Real size (as in the PDF)"
+    } else {
+        "Real size (from DPI)"
+    };
     let mode = match size {
         ItemSize::FromDpi { .. } => 0,
         ItemSize::Width { .. } => 1,
@@ -394,13 +641,9 @@ fn item_size(ui: &mut Ui, size: &mut ItemSize) {
     ui.horizontal(|ui| {
         ui.label("Size");
         egui::ComboBox::from_id_salt("size_mode")
-            .selected_text(["Real size (from DPI)", "Set width", "Exact size"][mode])
+            .selected_text([real, "Set width", "Exact size"][mode])
             .show_ui(ui, |ui| {
-                if ui
-                    .selectable_label(mode == 0, "Real size (from DPI)")
-                    .clicked()
-                    && mode != 0
-                {
+                if ui.selectable_label(mode == 0, real).clicked() && mode != 0 {
                     *size = ItemSize::default();
                 }
                 if ui.selectable_label(mode == 1, "Set width").clicked() && mode != 1 {
@@ -426,6 +669,9 @@ fn item_size(ui: &mut Ui, size: &mut ItemSize) {
         });
     });
     match size {
+        ItemSize::FromDpi { .. } if is_pdf => {
+            ui.label(RichText::new("Printed 1:1, exactly as large as in the PDF.").weak());
+        }
         ItemSize::FromDpi { fallback_dpi } => {
             ui.horizontal(|ui| {
                 ui.label("If the image has no DPI, assume");

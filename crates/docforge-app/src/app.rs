@@ -18,6 +18,7 @@ use crate::{
     canvas::{self, CanvasEvent, CanvasState, Status},
     inspector,
     pdf_view::PdfView,
+    thumbs::Thumbnails,
     viewport::Viewport,
     worker::{EvalResult, Evaluator, Job, NodeResult},
 };
@@ -51,6 +52,7 @@ pub struct DocforgeApp {
     canvas: CanvasState,
     viewport: Viewport,
     pdf_view: PdfView,
+    thumbs: Thumbnails,
     message: Option<(String, bool)>,
     confirm: Option<Pending>,
     title: String,
@@ -94,6 +96,7 @@ impl DocforgeApp {
             canvas: CanvasState::default(),
             viewport: Viewport::default(),
             pdf_view: PdfView::new(cc.egui_ctx.clone()),
+            thumbs: Thumbnails::new(cc.egui_ctx.clone()),
             message: None,
             confirm: None,
             title: String::new(),
@@ -123,7 +126,8 @@ impl DocforgeApp {
         use std::sync::atomic::Ordering;
         let busy = self.evaluator.is_busy()
             || self.rev != self.submitted_rev
-            || self.pdf_view.is_rendering();
+            || self.pdf_view.is_rendering()
+            || self.thumbs.is_busy();
         let Some(test) = &mut self.smoke_test else {
             return;
         };
@@ -382,7 +386,18 @@ impl DocforgeApp {
     /// The image arriving at the node's first connected input.
     fn input_image_of(&self, id: NodeId) -> Option<&Arc<RasterImage>> {
         let edge = self.graph.edges().iter().find(|e| e.to.node == id)?;
-        self.node_image(edge.from.node)
+        // The value on the exact port the wire leaves from: a node can have
+        // several image outputs (e.g. PDF Input's extracted images).
+        let index = self
+            .graph
+            .node(edge.from.node)?
+            .outputs()
+            .iter()
+            .position(|p| p.name == edge.from.port)?;
+        match self.results.as_ref()?.nodes.get(&edge.from.node)? {
+            NodeResult::Ready(values) => values.get(index)?.as_image(),
+            _ => None,
+        }
     }
 
     fn info(&mut self, text: String) {
@@ -656,7 +671,11 @@ impl DocforgeApp {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if inspector::node_params(ui, &mut self.graph, id, &self.registry) {
+                let extras = inspector::Extras {
+                    pdf: self.node_document(id).cloned(),
+                    thumbs: &mut self.thumbs,
+                };
+                if inspector::node_params(ui, &mut self.graph, id, &self.registry, extras) {
                     self.touch();
                 }
             });

@@ -1055,6 +1055,7 @@ dependencies = [
  "ab_glyph",
  "docforge-core",
  "epaint_default_fonts",
+ "hayro",
  "image",
  "lopdf",
  "png",
