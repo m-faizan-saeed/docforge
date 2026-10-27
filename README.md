@@ -42,7 +42,8 @@ as JSON project files that can be re-run from the command line.
 4. [Tool reference](#tool-reference)
    - [Input Image](#input-image) · [Output Image](#output-image) ·
      [Enhance Image](#enhance-image) · [Print Layout (PDF)](#print-layout-pdf) ·
-     [PDF Input](#pdf-input) · [PDF Edit](#pdf-edit) · [Groups](#groups)
+     [PDF Input](#pdf-input) · [PDF Edit](#pdf-edit) ·
+     [PDF Overlay](#pdf-overlay) · [Groups](#groups)
 5. [Recipes](#recipes)
 6. [Command-line tools](#command-line-tools)
 7. [Project files](#project-files)
@@ -187,6 +188,13 @@ step's card:
 - **Live updates:** drag at any zoom; only that step and the steps after it
   are recomputed while you drag.
 - **Leaving edit mode:** press **Done** or **Esc**, or select another node.
+
+The PDF tools work the same way:
+
+| Tool | Click | Handles |
+|---|---|---|
+| PDF Edit | **✥ Adjust on preview** | A crop box on the *incoming* page |
+| PDF Overlay | **✥** on a layer's card | The layer's outline on the stacked page; drag it to nudge the layer (other layers are dashed) |
 
 ### Files, projects and shortcuts
 
@@ -458,6 +466,45 @@ colour instructions without rasterising anything.
 - **Not recoloured:** images and gradient fills (shadings); the summary says
   how many were left.
 
+### PDF Overlay
+
+**Kind:** `pdf_overlay` · **Input:** `pdfs` (any number) · **Output:** `pdf`
+
+Stacks several PDFs onto one page, e.g. a gray PCB bottom layer under a
+black top layer. Connect PDFs (from PDF Input or PDF Edit) to `pdfs`. The
+first one connected is the bottom layer. Page *i* of the result stacks page
+*i* of every layer, and a layer with fewer pages simply ends. Every layer
+stays vector: it is embedded as one reusable object (Form XObject).
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `align` | `"original"` | `original` (each layer stays where it is on its own page), `center` (centres on the bottom layer's), `top_left` (top-left corners on the bottom layer's) |
+| `page_size` | `"union"` | `union` (big enough for every layer), `bottom` (the bottom layer's page; the rest is clipped) |
+| `layers` | `[]` | Settings per connected PDF, in connection order; missing entries use the defaults below |
+
+Per layer (`layers[i]`):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `visible` | `true` | Hidden layers are left out (and don't size the page) |
+| `opacity` | `1.0` | 0–1 |
+| `blend` | `"normal"` | `normal` (covers what is below), `multiply` (darkens; white becomes see-through), `darken` (keeps the darker colour) |
+| `offset_mm` | `[0, 0]` | Extra shift, right and down, in mm |
+
+- **Keeping layers in register.** With *Keep page positions* (`original`),
+  layers exported from the same design line up exactly, even when PDF Edit
+  cropped each to a different content box. Cropping only changes the page
+  boxes and keeps the drawing's coordinates.
+- **White backgrounds:** a layer with a white background hides everything
+  below it. Set the upper layers to **Multiply**; the inspector has a button
+  that does this for all of them.
+- **Inspector:** the layer cards are listed top of the stack first.
+  - **⏶ / ⏷** reorder the layers. This swaps the connections, and each
+    layer's settings move with its PDF.
+  - The checkbox shows or hides a layer.
+  - **✥** lets you drag the layer on the preview. Dragging changes
+    `offset_mm`; *Reset* puts it back.
+
 ### Groups
 
 **Kinds:** `group`, `group_input`, `group_output`
@@ -514,8 +561,25 @@ file. Use *Cutting lines → None* if the art has its own outline.
   silkscreen colour → black and the track colour → gray. With
   `reference-code/Simple SMPS.pdf` this gives black component outlines over
   gray tracks, cropped to the board, still vector.
-- **One PDF per layer:** recolour each with its own PDF Edit node, using the
-  *PCB top layer → black* and *PCB bottom layer → gray* presets.
+- **One PDF per layer:** recolour each layer with its own PDF Edit node,
+  using the *PCB top layer → black* and *PCB bottom layer → gray* presets.
+  Then stack them with PDF Overlay:
+
+  ```
+  PDF Input (bottom.pdf) → PDF Edit (bottom → gray) ─┐
+                                                      ├→ PDF Overlay → Print Layout
+  PDF Input (top.pdf)    → PDF Edit (top → black)  ──┘
+  ```
+
+  Connect the gray layer first, so it is the bottom layer, and set the top
+  layer's blend to **Multiply** so its white areas don't hide the gray. Keep
+  *Align layers → Keep page positions* and the layers stay in register. If
+  the exports are slightly misaligned, click **✥** on the top layer and drag
+  it into place.
+
+  To stack two colourings of one PDF, connect one PDF Input to both PDF Edit
+  nodes. From the command line, use the
+  [`pdf_overlay`](#pdf_overlay) example.
 
 ### Enhance images embedded in a PDF
 
@@ -555,6 +619,7 @@ Built binaries end up in `target/release/examples/<name>`.
 | `bench_effects` | `bench_effects [image]` | Time every Enhance effect (12 MP synthetic page by default) |
 | `pdf_bounds` | `pdf_bounds <file.pdf> [cropped.pdf]` | Show each page's content box and images; optionally save the cropped PDF |
 | `pdf_edit` | `pdf_edit <file.pdf> [out.pdf] [top\|bottom\|gray\|none]` | List the vector colours; optionally save a copy cropped to content and recoloured with a PCB preset |
+| `pdf_overlay` | `pdf_overlay <bottom.pdf> <top.pdf> <out.pdf>` | Make an assembly guide: the bottom PDF gray, the top PDF black (multiplied), both cropped to content and stacked |
 | `pdf_images` | `pdf_images <file.pdf> [out-dir]` | List embedded images; optionally extract all of them as PNG |
 
 ### run_graph
@@ -645,6 +710,17 @@ colours used (fills / strokes):
 PDF 1 page · cropped to content 99.6 × 54.8 mm · 2350 colours changed
 ```
 
+### pdf_overlay
+
+```sh
+cargo run --release -p docforge-nodes --example pdf_overlay -- bottom.pdf top.pdf guide.pdf
+```
+
+```
+2 layers on 1 page · 99.6 × 54.8 mm
+saved guide.pdf
+```
+
 ### pdf_images
 
 ```sh
@@ -711,6 +787,7 @@ between them.
 | `print_layout` | `images` (multi), `pdfs` (multi) | `pdf` |
 | `pdf_input` | — | `pdf`, + one per `selected_images` key |
 | `pdf_edit` | `pdf` | `pdf` |
+| `pdf_overlay` | `pdfs` (multi) | `pdf` |
 | `group_input` | — | `value` |
 | `group_output` | `value` | `value` |
 
@@ -784,8 +861,10 @@ Useful entry points:
 | `Graph::sync_from_doc` | Update a graph from a snapshot, keeping the caches of unchanged nodes |
 | `Graph::{copy_nodes, paste, duplicate}` | Copy part of a graph (as a `GraphDoc`), paste it under fresh ids, or duplicate nodes with their wires; pasting is all-or-nothing |
 | `Graph::probe` / `Node::probe` | Ask a node for an intermediate value from its last run, e.g. Enhance Image's `step_input/N` and `step_output/N` |
-| `InputImage::load`, `OutputImage::save`, `EnhanceImage::process`, `PrintLayout::build_with_pdfs`, `PdfInput::load`, `PdfEdit::apply` | Use a tool directly, without a graph |
+| `InputImage::load`, `OutputImage::save`, `EnhanceImage::process`, `PrintLayout::build_with_pdfs`, `PdfInput::load`, `PdfEdit::apply`, `PdfOverlay::apply` | Use a tool directly, without a graph |
 | `docforge_nodes::pdf_edit::palette` | The vector colours used in a PDF |
+| `PdfOverlay::layout` | Where each layer lands on each output page, without building the PDF |
+| `Graph::swap_inputs` | Reorder two connections on a multi-input port |
 | `NodeRegistry::register_migration` | Update old saved graphs on load (e.g. when a tool's job moves to another node) |
 | `docforge_nodes::pdf_input::images::{list, extract}` | List and decode images embedded in a PDF |
 
@@ -821,8 +900,9 @@ crates/
 │                    NodeRegistry, groups
 ├── docforge-nodes   The tools: input_image, output_image, enhance (filters,
 │                    document detection, overlays), print (packing, PDF
-│                    writer, vector art), pdf_input (content analysis,
-│                    image extraction)
+│                    writer, vector art), pdf (content analysis, shared
+│                    PDF helpers), pdf_input (loading, image extraction),
+│                    pdf_edit (crop, recolour), pdf_overlay (stacking)
 └── docforge-app     egui/eframe GUI: canvas, inspector, image/PDF preview,
                      background evaluator, thumbnails
 reference-code/      Original grid tool and sample PDFs
@@ -883,7 +963,8 @@ DOCFORGE_SCREENSHOT=shot.png DOCFORGE_SELECT=1 ./target/release/docforge project
   preview are shown. A comma-separated list selects several nodes.
 - `DOCFORGE_DUPLICATE=1`: duplicate the selection at start-up, as Ctrl+D does.
 - `DOCFORGE_EDIT_STEP=N`: open preview editing for step *N* (0-based) of the
-  selected Enhance Image node.
+  selected Enhance Image node, or for layer *N* of a selected PDF Overlay
+  (any value opens a PDF Edit crop).
 
 ---
 
@@ -897,7 +978,9 @@ DOCFORGE_SCREENSHOT=shot.png DOCFORGE_SELECT=1 ./target/release/docforge project
 | **"required input `images` or `pdfs` is not connected"** | Print Layout needs at least one image or PDF connected |
 | **Image prints at the wrong size** | It probably has no DPI. Set `dpi` in Input Image, use *Set width*/*Exact size* in Print Layout, or check the orange note in the PDF preview ("assumed 300 dpi") |
 | **Crop to document picks the wrong area** | Low contrast between page and background (e.g. white paper on a white table). Tick *Set manually* and enter the corners, or use Auto-crop border/Crop |
-| **PDF content box includes a background** | The background isn't plain white. Use `padding_mm`/`bounds`, or switch `crop_to_content` off |
+| **PDF content box includes a background** | The background isn't plain white. In PDF Edit use *Crop to → Manual box* (drag it with ✥ Adjust on preview) |
+| **Overlay: lower layers are hidden** | The upper layer has a white background. Set its blend to *Multiply* |
+| **Overlay: layers don't line up** | Use *Keep page positions* for layers exported from one design. Otherwise drag the layer with ✥ or set its offset |
 | **"image `p1 Im0` is not in this PDF"** | The PDF changed and that image is gone. Untick it in PDF Input |
 | **Slow processing** | Use a release build (`--release`). Very large photos are slower; Enhance only re-runs the steps after the one you edit |
 

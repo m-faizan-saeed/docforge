@@ -639,3 +639,22 @@ fn nodes_without_probes_return_none() {
     assert!(g.probe(src, "anything").is_none());
     assert!(g.probe(NodeId(42), "anything").is_none());
 }
+
+#[test]
+fn swapping_inputs_reorders_a_multi_input_port() {
+    let mut g = Graph::new();
+    let red = g.add(Solid {
+        color: [255, 0, 0, 255],
+    });
+    let green = g.add(Solid {
+        color: [0, 255, 0, 255],
+    });
+    let strip = g.add(Strip);
+    g.connect(red, "image", strip, "images").unwrap();
+    g.connect(green, "image", strip, "images").unwrap();
+    assert!(g.swap_inputs(strip, "images", 0, 1));
+    g.evaluate(&EvalContext::new());
+    let out = g.output(strip, "image").unwrap().as_image().unwrap();
+    assert_eq!(out.pixels(), [[0, 255, 0, 255], [255, 0, 0, 255]]);
+    assert!(!g.swap_inputs(strip, "images", 0, 5));
+}

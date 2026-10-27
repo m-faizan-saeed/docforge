@@ -8,6 +8,7 @@
 //! | `print_layout` | [`PrintLayout`] — pack images onto paper as a PDF |
 //! | `pdf_input`    | [`PdfInput`] — load a PDF and its embedded images |
 //! | `pdf_edit`     | [`PdfEdit`] — crop pages, recolour vector graphics |
+//! | `pdf_overlay`  | [`PdfOverlay`] — stack PDFs onto one page |
 
 mod dpi;
 pub mod enhance;
@@ -16,6 +17,7 @@ pub mod output_image;
 pub mod pdf;
 pub mod pdf_edit;
 pub mod pdf_input;
+pub mod pdf_overlay;
 pub mod print;
 mod runtime;
 
@@ -26,6 +28,7 @@ pub use input_image::InputImage;
 pub use output_image::{IfExists, OutputImage, PngCompression, SaveFormat};
 pub use pdf_edit::PdfEdit;
 pub use pdf_input::PdfInput;
+pub use pdf_overlay::PdfOverlay;
 pub use print::PrintLayout;
 
 /// Adds every tool from this crate to `registry`.
@@ -37,6 +40,7 @@ pub fn register_all(registry: &mut NodeRegistry) {
         .register::<PrintLayout>()
         .register::<PdfInput>()
         .register::<PdfEdit>()
+        .register::<PdfOverlay>()
         .register_migration(pdf_edit::migrate_pdf_input_crop);
 }
 

@@ -10,11 +10,12 @@ use docforge_core::{
     RasterImage, Value,
 };
 use docforge_nodes::{
-    EnhanceImage, InputImage, OutputImage, PdfEdit, PrintLayout,
+    EnhanceImage, InputImage, OutputImage, PdfEdit, PdfOverlay, PrintLayout,
     enhance::{step_input_key, step_output_key},
     input_image, output_image,
     pdf::{self as pdfkit, PageBox},
     pdf_edit::{CropMode, PaletteEntry},
+    pdf_overlay,
 };
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText, ViewportCommand};
 
@@ -478,6 +479,28 @@ impl DocforgeApp {
             NodeResult::Ready(values) => values.get(index)?.as_document(),
             _ => None,
         }
+    }
+
+    /// The documents arriving at `port` of the node, in connection order;
+    /// `None` for inputs that are not ready.
+    fn input_documents_of(&self, id: NodeId, port: &str) -> Vec<Option<Arc<PdfDocument>>> {
+        self.graph
+            .edges()
+            .iter()
+            .filter(|e| e.to.node == id && e.to.port == port)
+            .map(|edge| {
+                let index = self
+                    .graph
+                    .node(edge.from.node)?
+                    .outputs()
+                    .iter()
+                    .position(|p| p.name == edge.from.port)?;
+                match self.results.as_ref()?.nodes.get(&edge.from.node)? {
+                    NodeResult::Ready(values) => values.get(index)?.as_document().cloned(),
+                    _ => None,
+                }
+            })
+            .collect()
     }
 
     /// The vector colours of `doc`, computed once per document.
@@ -1093,6 +1116,10 @@ impl DocforgeApp {
             self.pdf_crop_preview(ui, node);
             return;
         }
+        if let Some((node, layer)) = self.overlay_target(target) {
+            self.overlay_preview(ui, node, layer);
+            return;
+        }
         if !self.show_input
             && let Some(doc) = target.and_then(|id| self.node_document(id)).cloned()
         {
@@ -1203,6 +1230,92 @@ impl DocforgeApp {
                     changed = true;
                 }
             });
+        if changed {
+            self.touch();
+        }
+    }
+
+    /// A PDF Overlay layer being dragged on the preview.
+    fn overlay_target(&self, target: Option<NodeId>) -> Option<(NodeId, usize)> {
+        let (node, layer) = self.edit_step?;
+        (Some(node) == target && self.graph.node_as::<PdfOverlay>(node).is_some())
+            .then_some((node, layer))
+    }
+
+    /// The preview while placing an overlay layer: the stacked page with
+    /// every layer outlined; dragging the chosen one changes its offset.
+    fn overlay_preview(&mut self, ui: &mut egui::Ui, node: NodeId, layer: usize) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("✥ Placing layer {}", layer + 1)).strong());
+            ui.label(RichText::new("Drag the highlighted layer; other layers are dashed.").weak());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Done").on_hover_text("Esc").clicked() {
+                    self.edit_step = None;
+                }
+            });
+        });
+        let inputs = self.input_documents_of(node, pdf_overlay::INPUT);
+        if inputs.iter().any(Option::is_none) {
+            ui.label(RichText::new("Waiting for the layers' PDFs…").weak());
+            return;
+        }
+        let Some(output) = self.node_document(node).cloned() else {
+            ui.label(
+                RichText::new("The overlay has no result yet (see the node's status).").weak(),
+            );
+            return;
+        };
+        let settings = self
+            .graph
+            .node_as::<PdfOverlay>(node)
+            .expect("checked")
+            .clone();
+        let boxes: Vec<Vec<PageBox>> = inputs
+            .iter()
+            .flatten()
+            .map(|d| pdfkit::page_boxes(d))
+            .collect();
+        // Output pages without any layer are not written; skip them likewise.
+        let layout: Vec<_> = settings
+            .layout(&boxes)
+            .into_iter()
+            .filter(|p| !p.layers.is_empty())
+            .collect();
+        let Some(page) = layout.get(self.pdf_view.page()).cloned() else {
+            self.pdf_view.show(ui, &output);
+            return;
+        };
+        let [w, h] = page.size.map(|v| v.max(1e-3));
+        // Placement rects are in points from the bottom-left; handles use
+        // fractions of the page from the top-left.
+        let norm = |[x0, y0, x1, y1]: [f32; 4]| [x0 / w, 1.0 - y1 / h, x1 / w, 1.0 - y0 / h];
+        let graph = &mut self.graph;
+        let mut changed = false;
+        self.pdf_view
+            .show_with_overlay(ui, &output, &mut |ui, frame| {
+                let mut active = None;
+                for p in &page.layers {
+                    if p.layer == layer {
+                        active = Some(p);
+                    } else {
+                        handles::ghost(ui, frame, norm(p.rect), Color32::from_gray(200));
+                    }
+                }
+                let Some(p) = active else { return };
+                let id = ui.make_persistent_id(("overlay_layer", node.0, layer));
+                let accent = Color32::from_rgb(80, 200, 255);
+                if let Some([dx, dy]) = handles::movable(ui, frame, id, norm(p.rect), accent) {
+                    let _ = graph.edit_node::<PdfOverlay, _>(node, |n| {
+                        let offset = &mut n.layer_mut(layer).offset_mm;
+                        offset[0] += dx * w / pdfkit::PT_PER_MM;
+                        offset[1] += dy * h / pdfkit::PT_PER_MM;
+                    });
+                    changed = true;
+                }
+            });
+        if !page.layers.iter().any(|p| p.layer == layer) {
+            ui.label(RichText::new("This layer is hidden or has no page here.").weak());
+        }
         if changed {
             self.touch();
         }

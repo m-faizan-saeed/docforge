@@ -10,14 +10,15 @@ use std::sync::Arc;
 use crate::thumbs::{Thumb, Thumbnails};
 use docforge_core::{Graph, NodeId, NodeRegistry, NodeType as _, PdfDocument};
 use docforge_nodes::{
-    Effect, EnhanceImage, IfExists, InputImage, OutputImage, PdfEdit, PdfInput, PngCompression,
-    PrintLayout, SaveFormat, Step,
+    Effect, EnhanceImage, IfExists, InputImage, OutputImage, PdfEdit, PdfInput, PdfOverlay,
+    PngCompression, PrintLayout, SaveFormat, Step,
     enhance::{
         AutoCrop, BlackAndWhite, BrightnessContrast, Crop, DetectDocument, Line, MagicColor,
         Rectangle, Rotate, Sharpen, Watermark,
     },
     pdf_edit::{ColorRule, CropMode, PaletteEntry, Recolor, RecolorMode},
     pdf_input::images,
+    pdf_overlay::{self, Align, Blend, PageSize},
     print::{self, CutMarks, ItemSize, PageOrientation, Paper, PrintItem},
 };
 use eframe::egui::{self, Color32, DragValue, Grid, RichText, Slider, TextEdit, Ui};
@@ -64,35 +65,65 @@ pub fn node_params(
             .edit_node::<PdfInput, _>(id, |n| pdf_input(ui, n, salt, extras))
             .unwrap_or(false),
         k if k == PrintLayout::KIND => {
-            // Name each piece after the node feeding it, in connection order.
-            let sources = |port: &str| -> Vec<String> {
-                graph
-                    .edges()
-                    .iter()
-                    .filter(|e| e.to.node == id && e.to.port == port)
-                    .map(|e| {
-                        let label = graph.meta(e.from.node).and_then(|m| m.label.clone());
-                        let kind = graph
-                            .node(e.from.node)
-                            .map(|n| n.kind())
-                            .unwrap_or_default();
-                        label.unwrap_or_else(|| {
-                            format!(
-                                "{} {}",
-                                crate::canvas::display_name(registry, kind),
-                                e.from.node
-                            )
-                        })
-                    })
-                    .collect()
-            };
-            let (images, pdfs) = (sources(print::INPUT), sources(print::PDF_INPUT));
+            let images = input_names(graph, registry, id, print::INPUT);
+            let pdfs = input_names(graph, registry, id, print::PDF_INPUT);
             graph
                 .edit_node::<PrintLayout, _>(id, |n| print_layout(ui, n, salt, &images, &pdfs))
                 .unwrap_or(false)
         }
+        k if k == PdfOverlay::KIND => {
+            let layers = input_names(graph, registry, id, pdf_overlay::INPUT);
+            let mut swap = None;
+            let mut changed = graph
+                .edit_node::<PdfOverlay, _>(id, |n| {
+                    pdf_overlay(ui, n, &layers, extras.edit_step, &mut swap)
+                })
+                .unwrap_or(false);
+            if let Some((a, b)) = swap
+                && graph.swap_inputs(id, pdf_overlay::INPUT, a, b)
+            {
+                // The settings travel with their PDF.
+                let _ = graph.edit_node::<PdfOverlay, _>(id, |n| {
+                    n.layer_mut(a.max(b));
+                    n.layers.swap(a, b);
+                });
+                if let Some(step) = extras.edit_step.as_mut() {
+                    *step = match *step {
+                        s if s == a => b,
+                        s if s == b => a,
+                        s => s,
+                    };
+                }
+                changed = true;
+            }
+            changed
+        }
         _ => raw_json(ui, graph, id, registry),
     }
+}
+
+/// Names of the nodes feeding `port`, in connection order: their labels, or
+/// kind and id.
+fn input_names(graph: &Graph, registry: &NodeRegistry, id: NodeId, port: &str) -> Vec<String> {
+    graph
+        .edges()
+        .iter()
+        .filter(|e| e.to.node == id && e.to.port == port)
+        .map(|e| {
+            let label = graph.meta(e.from.node).and_then(|m| m.label.clone());
+            let kind = graph
+                .node(e.from.node)
+                .map(|n| n.kind())
+                .unwrap_or_default();
+            label.unwrap_or_else(|| {
+                format!(
+                    "{} {}",
+                    crate::canvas::display_name(registry, kind),
+                    e.from.node
+                )
+            })
+        })
+        .collect()
 }
 
 // ----- Input Image -----------------------------------------------------------
@@ -667,6 +698,204 @@ fn recolor_name(m: RecolorMode) -> &'static str {
 }
 
 // ----- Print Layout ----------------------------------------------------------
+
+// ----- PDF Overlay ---------------------------------------------------------------
+
+/// Layer cards, top layer first as in drawing apps. `swap` receives a pair
+/// of connection indices to exchange.
+fn pdf_overlay(
+    ui: &mut Ui,
+    node: &mut PdfOverlay,
+    layers: &[String],
+    edit_step: &mut Option<usize>,
+    swap: &mut Option<(usize, usize)>,
+) -> bool {
+    let mut changed = false;
+    ui.strong("Layers");
+    if layers.is_empty() {
+        ui.label(
+            RichText::new(
+                "Connect two or more PDFs to “pdfs”. The first connected is the bottom layer.",
+            )
+            .weak(),
+        );
+    } else {
+        ui.label(RichText::new("Top of the stack first.").weak().small());
+    }
+    let n = layers.len();
+    for (i, name) in layers.iter().enumerate().rev() {
+        let mut layer = node.layer(i);
+        let editing = *edit_step == Some(i);
+        let before = layer;
+        ui.push_id(("layer", i), |ui| {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut layer.visible, "")
+                        .on_hover_text("Show this layer");
+                    ui.label(RichText::new(format!("{}. {name}", i + 1)).strong());
+                    match i {
+                        0 => ui.label(RichText::new("bottom").weak().small()),
+                        _ if i + 1 == n => ui.label(RichText::new("top").weak().small()),
+                        _ => ui.label(""),
+                    };
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add_enabled(i > 0, egui::Button::new("⏷").small())
+                            .on_hover_text("Move down")
+                            .clicked()
+                        {
+                            *swap = Some((i, i - 1));
+                        }
+                        if ui
+                            .add_enabled(i + 1 < n, egui::Button::new("⏶").small())
+                            .on_hover_text("Move up")
+                            .clicked()
+                        {
+                            *swap = Some((i, i + 1));
+                        }
+                        if ui
+                            .selectable_label(editing, "✥")
+                            .on_hover_text("Drag this layer on the preview")
+                            .clicked()
+                        {
+                            *edit_step = (!editing).then_some(i);
+                        }
+                    });
+                });
+                Grid::new("layer_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Opacity");
+                        ui.add(percent_slider(&mut layer.opacity, 0.0..=1.0));
+                        ui.end_row();
+                        ui.label("Blend");
+                        egui::ComboBox::from_id_salt("blend")
+                            .selected_text(blend_name(layer.blend))
+                            .show_ui(ui, |ui| {
+                                for b in [Blend::Normal, Blend::Multiply, Blend::Darken] {
+                                    ui.selectable_value(&mut layer.blend, b, blend_name(b))
+                                        .on_hover_text(blend_hint(b));
+                                }
+                            });
+                        ui.end_row();
+                        ui.label("Offset (right, down)");
+                        ui.horizontal(|ui| {
+                            for v in &mut layer.offset_mm {
+                                ui.add(DragValue::new(v).speed(0.1).suffix(" mm"));
+                            }
+                            if layer.offset_mm != [0.0, 0.0] && ui.small_button("Reset").clicked() {
+                                layer.offset_mm = [0.0, 0.0];
+                            }
+                        });
+                        ui.end_row();
+                    });
+            });
+        });
+        if layer != before {
+            *node.layer_mut(i) = layer;
+            changed = true;
+        }
+    }
+    if n > 0 && node.layers.len() > n {
+        // Settings of disconnected layers are kept, so reconnecting restores them.
+        ui.label(
+            RichText::new(format!(
+                "{} more layer setting(s) are kept for PDFs not connected now.",
+                node.layers.len() - n
+            ))
+            .weak()
+            .small(),
+        );
+    }
+    if n > 1
+        && (0..n).all(|i| node.layer(i).blend == Blend::Normal)
+        && ui
+            .small_button("Make white see-through (Multiply upper layers)")
+            .on_hover_text(
+                "Upper layers with a white background would otherwise hide what is below",
+            )
+            .clicked()
+    {
+        for i in 1..n {
+            node.layer_mut(i).blend = Blend::Multiply;
+        }
+        changed = true;
+    }
+
+    ui.add_space(6.0);
+    ui.strong("Page");
+    Grid::new("overlay_page")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Align layers");
+            egui::ComboBox::from_id_salt("align")
+                .selected_text(align_name(node.align))
+                .show_ui(ui, |ui| {
+                    for a in [Align::Original, Align::Center, Align::TopLeft] {
+                        changed |= ui
+                            .selectable_value(&mut node.align, a, align_name(a))
+                            .changed();
+                    }
+                });
+            ui.end_row();
+            ui.label("Page size");
+            egui::ComboBox::from_id_salt("page_size")
+                .selected_text(page_size_name(node.page_size))
+                .show_ui(ui, |ui| {
+                    for p in [PageSize::Union, PageSize::Bottom] {
+                        changed |= ui
+                            .selectable_value(&mut node.page_size, p, page_size_name(p))
+                            .changed();
+                    }
+                });
+            ui.end_row();
+        });
+    if node.align == Align::Original {
+        ui.label(
+            RichText::new(
+                "Layers stay where they are on their own pages, so layers exported from one \
+                 design line up even when PDF Edit cropped them differently.",
+            )
+            .weak()
+            .small(),
+        );
+    }
+    changed
+}
+
+fn blend_name(b: Blend) -> &'static str {
+    match b {
+        Blend::Normal => "Normal",
+        Blend::Multiply => "Multiply",
+        Blend::Darken => "Darken",
+    }
+}
+
+fn blend_hint(b: Blend) -> &'static str {
+    match b {
+        Blend::Normal => "Covers what is below",
+        Blend::Multiply => "Darkens what is below; white becomes see-through",
+        Blend::Darken => "Keeps the darker colour of the two",
+    }
+}
+
+fn align_name(a: Align) -> &'static str {
+    match a {
+        Align::Original => "Keep page positions",
+        Align::Center => "Centres",
+        Align::TopLeft => "Top-left corners",
+    }
+}
+
+fn page_size_name(p: PageSize) -> &'static str {
+    match p {
+        PageSize::Union => "Fit all layers",
+        PageSize::Bottom => "Bottom layer's page",
+    }
+}
 
 fn print_layout(
     ui: &mut Ui,

@@ -333,6 +333,27 @@ impl Graph {
         Ok(())
     }
 
+    /// Swaps the order of the `a`-th and `b`-th connections into a
+    /// multi-input port (the order in which the node receives its values,
+    /// e.g. stacking order). Returns whether both connections exist.
+    pub fn swap_inputs(&mut self, node: NodeId, port: &str, a: usize, b: usize) -> bool {
+        let positions: Vec<usize> = self
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.to.node == node && e.to.port == port)
+            .map(|(i, _)| i)
+            .collect();
+        let (Some(&ia), Some(&ib)) = (positions.get(a), positions.get(b)) else {
+            return false;
+        };
+        if ia != ib {
+            self.edges.swap(ia, ib);
+            self.invalidate(node);
+        }
+        true
+    }
+
     /// Removes every connection into `to.to_port`; returns how many.
     pub fn disconnect(&mut self, to: NodeId, to_port: &str) -> usize {
         let before = self.edges.len();

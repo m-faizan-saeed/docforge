@@ -317,6 +317,65 @@ pub fn rect(
     false
 }
 
+/// A rectangle that can only be moved, and may leave the image (e.g. a
+/// layer nudged past the page edge). Returns this frame's normalised drag.
+pub fn movable(
+    ui: &mut Ui,
+    frame: &ImageFrame,
+    id: Id,
+    r: [f32; 4],
+    color: Color32,
+) -> Option<[f32; 2]> {
+    let r = ordered(r);
+    let screen = Rect::from_two_pos(frame.screen([r[0], r[1]]), frame.screen([r[2], r[3]]));
+    let painter = ui.painter_at(frame.clip);
+    painter.rect_filled(screen, 0.0, color.gamma_multiply(0.12));
+    outline(
+        &painter,
+        vec![
+            screen.left_top(),
+            screen.right_top(),
+            screen.right_bottom(),
+            screen.left_bottom(),
+        ],
+        true,
+        color,
+        false,
+    );
+    let body = ui
+        .interact(screen.intersect(frame.clip), id.with("body"), Sense::drag())
+        .on_hover_cursor(CursorIcon::Grab);
+    let centre = grip(
+        ui,
+        frame,
+        id.with("move"),
+        screen.center(),
+        CursorIcon::Grab,
+    );
+    [body, centre]
+        .into_iter()
+        .find(|r| r.dragged() && r.drag_delta() != Vec2::ZERO)
+        .map(|r| frame.delta(r.drag_delta()))
+}
+
+/// A dashed outline, for shapes shown but not being edited.
+pub fn ghost(ui: &mut Ui, frame: &ImageFrame, r: [f32; 4], color: Color32) {
+    let r = ordered(r);
+    let screen = Rect::from_two_pos(frame.screen([r[0], r[1]]), frame.screen([r[2], r[3]]));
+    outline(
+        &ui.painter_at(frame.clip),
+        vec![
+            screen.left_top(),
+            screen.right_top(),
+            screen.right_bottom(),
+            screen.left_bottom(),
+        ],
+        true,
+        color,
+        true,
+    );
+}
+
 /// Four corners (top-left, top-right, bottom-right, bottom-left), each
 /// draggable. `dashed` marks a suggestion that is not yet in use.
 pub fn quad(
@@ -478,6 +537,20 @@ mod interaction_tests {
         close(r[0], 0.15);
         close(r[1], 0.15);
         close(r[2] - r[0], 0.5);
+    }
+
+    #[test]
+    fn a_movable_rectangle_reports_unclamped_drags() {
+        let r = [0.25, 0.25, 0.75, 0.75];
+        let mut moved = [0.0, 0.0];
+        // From inside to well past the right edge.
+        drag(pos2(260.0, 280.0), pos2(760.0, 240.0), |ui| {
+            if let Some([dx, dy]) = movable(ui, &FRAME, Id::unique("m"), r, Color32::WHITE) {
+                moved = [moved[0] + dx, moved[1] + dy];
+            }
+        });
+        close(moved[0], 1.25);
+        close(moved[1], -0.1);
     }
 
     #[test]
