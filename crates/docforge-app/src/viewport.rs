@@ -154,7 +154,13 @@ impl Viewport {
             }
         }
 
-        let image_rect = Rect::from_center_size(rect.center() + self.pan, img_size * self.zoom);
+        let mut image_rect = Rect::from_center_size(rect.center() + self.pan, img_size * self.zoom);
+        // A different image (e.g. a cropped page after the whole page) can
+        // land outside the view at the old zoom and scroll: bring it back.
+        if !response.dragged() && out_of_view(rect, image_rect) {
+            self.pan = Vec2::ZERO;
+            image_rect = Rect::from_center_size(rect.center(), image_rect.size());
+        }
         let checker = self.checker(ui.ctx());
         let tiles = image_rect.size() / 16.0;
         painter.image(
@@ -266,6 +272,13 @@ impl Viewport {
     }
 }
 
+/// Whether hardly any of `image` (a few points at most) is inside `view`.
+fn out_of_view(view: Rect, image: Rect) -> bool {
+    let seen = view.intersect(image);
+    let wanted = (image.width().min(view.width()) * image.height().min(view.height())).min(400.0);
+    !seen.is_positive() || seen.area() < wanted
+}
+
 fn fit_zoom(view: Vec2, image: Vec2) -> f32 {
     if image.x <= 0.0 || image.y <= 0.0 {
         return 1.0;
@@ -295,4 +308,23 @@ fn to_color_image(image: &RasterImage, max_side: usize) -> ColorImage {
         }
     }
     ColorImage::from_rgba_unmultiplied([sw, sh], &out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_image_scrolled_out_of_view_is_detected() {
+        let view = Rect::from_min_size(pos2(0.0, 0.0), vec2(600.0, 400.0));
+        let at = |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(pos2(x, y), vec2(w, h));
+        assert!(!out_of_view(view, at(100.0, 100.0, 50.0, 50.0)));
+        // Zoomed in far: only part of a huge image is visible, which is fine.
+        assert!(!out_of_view(view, at(-5000.0, -5000.0, 20000.0, 20000.0)));
+        // Mostly off to the side but a usable strip still shows.
+        assert!(!out_of_view(view, at(580.0, 0.0, 300.0, 300.0)));
+        // Gone, or only a sliver left.
+        assert!(out_of_view(view, at(900.0, 100.0, 300.0, 300.0)));
+        assert!(out_of_view(view, at(-299.0, 0.0, 300.0, 300.0)));
+    }
 }

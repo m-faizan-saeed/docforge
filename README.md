@@ -157,7 +157,7 @@ The preview shows the output of the selected node, or of the pinned node.
 | Drag | Pan |
 | Double-click, **Fit** | Fit to the view |
 | **100%** | One image pixel per screen point; for PDFs, roughly life-size |
-| **Output / Input** | Before/after: show what the node produces or what it receives |
+| **Output / Input** | Before/after: show what the node produces or what it receives (images and PDFs) |
 | **📌 Pin** | Keep previewing this node while you select and edit others |
 
 The toolbar shows the pixel size, DPI and physical size in mm, plus the
@@ -166,6 +166,10 @@ coordinates and RGBA value of the pixel under the cursor.
 - **PDF documents** get page navigation (◀ ▶) and a summary line, for example
   *"7 pieces on 1 A4 page (landscape) · 61% of the paper used"*. Warnings
   appear below it in orange.
+- **Zoom is kept** when you switch nodes or Output/Input, for comparing
+  details. Entering or leaving editing on the preview (✥) fits the view
+  again. If a smaller picture would end up outside the view at the kept
+  zoom, it is centred.
 - **Sharpness when zoomed:** pages re-render at higher resolution in the
   background as you zoom in, so vector art stays sharp.
 
@@ -931,7 +935,7 @@ reference-code/      Original grid tool and sample PDFs
 ## Development and testing
 
 ```sh
-cargo test --workspace                          # all tests (~130)
+cargo test --workspace                          # all tests (~150)
 cargo test -p docforge-nodes pdf_input          # one area
 cargo clippy --workspace --all-targets          # lints (kept warning-free)
 cargo fmt --all                                 # formatting
@@ -948,6 +952,18 @@ cargo fmt --all                                 # formatting
 The PDF tests render pages with `hayro` and compare against the measured
 content boxes, so the geometry is checked against a real renderer rather than
 only against hand-calculated numbers.
+
+### Test projects for the app
+
+`test-projects/` holds the projects used to try every tool in the GUI, with
+their inputs. Paths in them are relative, so they work from any checkout.
+See [`test-projects/README.md`](test-projects/README.md).
+
+```sh
+cargo build --release
+./target/release/docforge test-projects/pcb-overlay.json   # open one
+test-projects/screenshots.sh                               # screenshot all → test-projects/out/
+```
 
 ### Automated GUI screenshots
 

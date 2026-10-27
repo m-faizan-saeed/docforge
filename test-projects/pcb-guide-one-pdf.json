@@ -1,0 +1,13 @@
+{"version": 1,
+ "nodes": [
+  {"id": 0, "kind": "pdf_input", "params": {"path": "../reference-code/Simple SMPS.pdf"}, "meta": {"position": [0, 40], "label": "Simple SMPS"}},
+  {"id": 1, "kind": "pdf_edit", "meta": {"position": [240, 40], "label": "Assembly colours"}, "params": {
+     "crop": "content",
+     "recolor": {"mode": "replace", "tolerance": 24,
+                 "rules": [{"from": [255, 0, 0], "to": [0, 0, 0]}, {"from": [0, 0, 0], "to": [170, 170, 170]}]}}},
+  {"id": 2, "kind": "print_layout", "params": {"pdf_items": [{"fill": true}], "cut_marks": "none", "path": "out/pcb-guide-sheet.pdf"}, "meta": {"position": [480, 40]}}
+ ],
+ "edges": [
+  {"from": {"node": 0, "port": "pdf"}, "to": {"node": 1, "port": "pdf"}},
+  {"from": {"node": 1, "port": "pdf"}, "to": {"node": 2, "port": "pdfs"}}
+ ]}

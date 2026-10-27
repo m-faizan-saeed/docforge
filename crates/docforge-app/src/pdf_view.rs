@@ -83,6 +83,11 @@ impl PdfView {
         self.requested.is_some()
     }
 
+    /// Fit the page to the view again on the next frame.
+    pub fn request_fit(&mut self) {
+        self.viewport.request_fit();
+    }
+
     /// The page being shown (0-based).
     pub fn page(&self) -> usize {
         self.page

@@ -1,0 +1,18 @@
+{"version": 1,
+ "nodes": [
+  {"id": 0, "kind": "pdf_input", "params": {"path": "../reference-code/Simple SMPS.pdf"}, "meta": {"position": [0, 120], "label": "Simple SMPS"}},
+  {"id": 1, "kind": "pdf_edit", "meta": {"position": [240, 20], "label": "Bottom (gray)"}, "params": {
+     "crop": "content", "recolor": {"mode": "single", "color": [160, 160, 160], "keep_white": true}}},
+  {"id": 2, "kind": "pdf_edit", "meta": {"position": [240, 220], "label": "Top (red to black)"}, "params": {
+     "crop": "content", "recolor": {"mode": "replace", "tolerance": 24, "rules": [{"from": [255, 0, 0], "to": [0, 0, 0]}]}}},
+  {"id": 3, "kind": "pdf_overlay", "meta": {"position": [480, 120], "label": "Assembly guide"}, "params": {
+     "layers": [{}, {"blend": "multiply", "offset_mm": [4.0, 3.0]}]}},
+  {"id": 4, "kind": "print_layout", "params": {"pdf_items": [{"copies": 1}], "cut_marks": "none", "path": "out/assembly-guide.pdf"}, "meta": {"position": [720, 120]}}
+ ],
+ "edges": [
+  {"from": {"node": 0, "port": "pdf"}, "to": {"node": 1, "port": "pdf"}},
+  {"from": {"node": 0, "port": "pdf"}, "to": {"node": 2, "port": "pdf"}},
+  {"from": {"node": 1, "port": "pdf"}, "to": {"node": 3, "port": "pdfs"}},
+  {"from": {"node": 2, "port": "pdf"}, "to": {"node": 3, "port": "pdfs"}},
+  {"from": {"node": 3, "port": "pdf"}, "to": {"node": 4, "port": "pdfs"}}
+ ]}

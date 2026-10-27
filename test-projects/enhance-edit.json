@@ -1,0 +1,16 @@
+{"version": 1,
+ "nodes": [
+  {"id": 0, "kind": "input_image", "params": {"path": "inputs/photo.jpg"}, "meta": {"position": [0, 40], "label": "Phone photo"}},
+  {"id": 1, "kind": "enhance_image", "meta": {"position": [240, 40]}, "params": {"steps": [
+    {"effect": "detect_document"},
+    {"effect": "crop", "left": 0.08, "top": 0.05, "right": 0.1, "bottom": 0.3},
+    {"effect": "rectangle", "min": [0.55, 0.62], "max": [0.95, 0.9], "fill": [255, 235, 59, 110]},
+    {"effect": "watermark", "text": "COPY", "position": [0.45, 0.4]},
+    {"effect": "line", "from": [0.05, 0.18], "to": [0.95, 0.2], "color": [200, 30, 30, 255]}
+  ]}},
+  {"id": 2, "kind": "output_image", "params": {"path": "out/photo-clean.png", "auto_save": false}, "meta": {"position": [480, 40]}}
+ ],
+ "edges": [
+  {"from": {"node": 0, "port": "image"}, "to": {"node": 1, "port": "image"}},
+  {"from": {"node": 1, "port": "image"}, "to": {"node": 2, "port": "image"}}
+ ]}

@@ -73,6 +73,9 @@ pub struct DocforgeApp {
     /// Preview this node regardless of the selection.
     pinned: Option<NodeId>,
     show_input: bool,
+    /// The preview's edit mode last frame (node and step), to refit the
+    /// view when entering or leaving it.
+    preview_edit: Option<(NodeId, usize)>,
     canvas: CanvasState,
     viewport: Viewport,
     pdf_view: PdfView,
@@ -128,6 +131,7 @@ impl DocforgeApp {
             palette: None,
             pinned: None,
             show_input: false,
+            preview_edit: None,
             canvas: CanvasState::default(),
             viewport: Viewport::default(),
             pdf_view: PdfView::new(cc.egui_ctx.clone()),
@@ -1108,6 +1112,14 @@ impl DocforgeApp {
         });
         ui.separator();
 
+        // Editing shows a different picture (e.g. the whole incoming page
+        // instead of the cropped result): start each from a fitted view.
+        let edit = self.edit_step.filter(|(node, _)| Some(*node) == target);
+        if edit != self.preview_edit {
+            self.preview_edit = edit;
+            self.pdf_view.request_fit();
+            self.viewport.request_fit();
+        }
         if let Some((node, step, frame)) = self.edit_target(target) {
             self.edit_preview(ui, node, step, frame);
             return;
@@ -1120,9 +1132,14 @@ impl DocforgeApp {
             self.overlay_preview(ui, node, layer);
             return;
         }
-        if !self.show_input
-            && let Some(doc) = target.and_then(|id| self.node_document(id)).cloned()
-        {
+        let doc = target.and_then(|id| {
+            if self.show_input {
+                self.input_document_of(id)
+            } else {
+                self.node_document(id)
+            }
+        });
+        if let Some(doc) = doc.cloned() {
             self.pdf_view.show(ui, &doc);
             return;
         }
