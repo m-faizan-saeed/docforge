@@ -533,7 +533,7 @@ fn pdf_art<'a>(
     page: lopdf::ObjectId,
     info: Option<&PdfPageInfo>,
 ) -> Option<PdfArt<'a>> {
-    use crate::pdf_input::analyze::{inherited, num, rect};
+    use crate::pdf::analyze::{inherited, num, rect};
     let (bbox, rotation) = match info {
         Some(info) => (info.content_box?, info.rotation),
         None => {
@@ -888,14 +888,16 @@ mod tests {
         out
     }
 
-    /// Loads `bytes` through PDF Input (analysed and cropped to content).
+    /// Loads `bytes` through PDF Input and crops it to its content with
+    /// PDF Edit, as the app's PDF → Edit → Layout chain does.
     fn art(bytes: &[u8]) -> PdfDocument {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("art.pdf");
         std::fs::write(&path, bytes).unwrap();
-        crate::PdfInput::new(&path)
+        let loaded = crate::PdfInput::new(&path)
             .load(&EvalContext::new())
-            .unwrap()
+            .unwrap();
+        crate::PdfEdit::default().apply(&loaded).unwrap()
     }
 
     /// Every `cm … Do` on the first page: (xobject name, art box placed, in mm).
@@ -922,7 +924,7 @@ mod tests {
                 .iter()
                 .map(|o| o.as_float().unwrap() as f64)
                 .collect();
-            let m = crate::pdf_input::geometry::Matrix::new([m[0], m[1], m[2], m[3], m[4], m[5]]);
+            let m = crate::pdf::geometry::Matrix::new([m[0], m[1], m[2], m[3], m[4], m[5]]);
             let name = pair[1].operands[0].as_name().unwrap();
             let id = xobjects.get(name).unwrap().as_reference().unwrap();
             let dict = &pdf.get_object(id).unwrap().as_stream().unwrap().dict;
@@ -935,11 +937,11 @@ mod tests {
                         .iter()
                         .map(|o| o.as_float().unwrap() as f64)
                         .collect();
-                    crate::pdf_input::geometry::Bbox::from_rect([v[0], v[1], v[2], v[3]])
+                    crate::pdf::geometry::Bbox::from_rect([v[0], v[1], v[2], v[3]])
                 }
-                Err(_) => crate::pdf_input::geometry::Bbox::from_rect([0.0, 0.0, 1.0, 1.0]),
+                Err(_) => crate::pdf::geometry::Bbox::from_rect([0.0, 0.0, 1.0, 1.0]),
             };
-            let r = crate::pdf_input::geometry::Bbox::transformed(&src, &m);
+            let r = crate::pdf::geometry::Bbox::transformed(&src, &m);
             let mm = |v: f64| (v * 25.4 / 72.0) as f32;
             out.push((
                 String::from_utf8_lossy(name).into_owned(),

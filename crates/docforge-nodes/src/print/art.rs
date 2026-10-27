@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use lopdf::{Dictionary, Document, Object, ObjectId, Stream, dictionary};
 
 use super::pack::Rect;
-use crate::pdf_input::{analyze::inherited, geometry::Matrix};
+use crate::pdf::{analyze::inherited, geometry::Matrix};
 
 /// One page of a source PDF, to be printed as a piece.
 pub struct PdfArt<'a> {

@@ -10,13 +10,14 @@ use std::sync::Arc;
 use crate::thumbs::{Thumb, Thumbnails};
 use docforge_core::{Graph, NodeId, NodeRegistry, NodeType as _, PdfDocument};
 use docforge_nodes::{
-    Effect, EnhanceImage, IfExists, InputImage, OutputImage, PdfInput, PngCompression, PrintLayout,
-    SaveFormat, Step,
+    Effect, EnhanceImage, IfExists, InputImage, OutputImage, PdfEdit, PdfInput, PngCompression,
+    PrintLayout, SaveFormat, Step,
     enhance::{
         AutoCrop, BlackAndWhite, BrightnessContrast, Crop, DetectDocument, Line, MagicColor,
         Rectangle, Rotate, Sharpen, Watermark,
     },
-    pdf_input::{Bounds, images},
+    pdf_edit::{ColorRule, CropMode, PaletteEntry, Recolor, RecolorMode},
+    pdf_input::images,
     print::{self, CutMarks, ItemSize, PageOrientation, Paper, PrintItem},
 };
 use eframe::egui::{self, Color32, DragValue, Grid, RichText, Slider, TextEdit, Ui};
@@ -31,6 +32,8 @@ pub struct Extras<'a> {
     pub thumbs: &'a mut Thumbnails,
     /// The step of this node being edited with handles on the preview.
     pub edit_step: &'a mut Option<usize>,
+    /// Colours of the PDF arriving at the node (PDF Edit lists them).
+    pub palette: Option<Arc<Vec<PaletteEntry>>>,
 }
 
 pub fn node_params(
@@ -53,6 +56,9 @@ pub fn node_params(
             .unwrap_or(false),
         k if k == EnhanceImage::KIND => graph
             .edit_node::<EnhanceImage, _>(id, |n| enhance_image(ui, n, extras.edit_step))
+            .unwrap_or(false),
+        k if k == PdfEdit::KIND => graph
+            .edit_node::<PdfEdit, _>(id, |n| pdf_edit(ui, n, extras))
             .unwrap_or(false),
         k if k == PdfInput::KIND => graph
             .edit_node::<PdfInput, _>(id, |n| pdf_input(ui, n, salt, extras))
@@ -265,45 +271,11 @@ fn pdf_input(ui: &mut Ui, node: &mut PdfInput, salt: u64, extras: Extras<'_>) ->
             changed = true;
         }
     });
-    ui.add_space(4.0);
-    changed |= ui
-        .checkbox(&mut node.crop_to_content, "Crop pages to their content")
-        .on_hover_text("Off: the PDF passes through unchanged and the content box is only reported")
-        .changed();
-    Grid::new("pdf_input_grid")
-        .num_columns(2)
-        .spacing([12.0, 6.0])
-        .show(ui, |ui| {
-            ui.label("Content box");
-            egui::ComboBox::from_id_salt("bounds")
-                .selected_text(bounds_name(node.bounds))
-                .show_ui(ui, |ui| {
-                    for b in [Bounds::Content, Bounds::CropBox, Bounds::MediaBox] {
-                        changed |= ui
-                            .selectable_value(&mut node.bounds, b, bounds_name(b))
-                            .changed();
-                    }
-                });
-            ui.end_row();
-            if node.bounds == Bounds::Content {
-                ui.label("Padding");
-                changed |= ui
-                    .add(
-                        DragValue::new(&mut node.padding_mm)
-                            .range(0.0..=50.0)
-                            .speed(0.1)
-                            .suffix(" mm"),
-                    )
-                    .changed();
-                ui.end_row();
-            }
-        });
-    if node.bounds == Bounds::Content {
-        changed |= ui
-            .checkbox(&mut node.ignore_white_fills, "Ignore white areas")
-            .on_hover_text("White-filled shapes (e.g. page backgrounds) don't count as content")
-            .changed();
-    }
+    ui.label(
+        RichText::new("The PDF passes on unchanged. To crop it or change its colours, connect a PDF Edit node.")
+            .weak()
+            .small(),
+    );
     changed |= embedded_images(ui, node, extras);
     changed
 }
@@ -415,11 +387,282 @@ fn embedded_images(ui: &mut Ui, node: &mut PdfInput, extras: Extras<'_>) -> bool
     true
 }
 
-fn bounds_name(b: Bounds) -> &'static str {
-    match b {
-        Bounds::Content => "Detected content",
-        Bounds::CropBox => "Visible page (CropBox)",
-        Bounds::MediaBox => "Full page (MediaBox)",
+// ----- PDF Edit ----------------------------------------------------------------
+
+fn pdf_edit(ui: &mut Ui, node: &mut PdfEdit, extras: Extras<'_>) -> bool {
+    let mut changed = false;
+
+    ui.horizontal(|ui| {
+        ui.strong("Crop");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let on = *extras.edit_step == Some(0);
+            if ui
+                .selectable_label(on, "✥ Adjust on preview")
+                .on_hover_text("Drag a crop box on the page instead of typing numbers")
+                .clicked()
+            {
+                *extras.edit_step = (!on).then_some(0);
+            }
+        });
+    });
+    Grid::new("pdf_edit_crop")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Crop to");
+            egui::ComboBox::from_id_salt("crop_mode")
+                .selected_text(crop_name(node.crop))
+                .show_ui(ui, |ui| {
+                    for c in [CropMode::Content, CropMode::Manual, CropMode::None] {
+                        changed |= ui
+                            .selectable_value(&mut node.crop, c, crop_name(c))
+                            .changed();
+                    }
+                });
+            ui.end_row();
+            match node.crop {
+                CropMode::Content => {
+                    ui.label("Padding");
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut node.padding_mm)
+                                .range(0.0..=50.0)
+                                .speed(0.1)
+                                .suffix(" mm"),
+                        )
+                        .changed();
+                    ui.end_row();
+                }
+                CropMode::Manual => {
+                    let b = &mut node.manual_box;
+                    for (label, value) in [("Left", 0), ("Top", 1), ("Right", 2), ("Bottom", 3)] {
+                        ui.label(label);
+                        changed |= ui.add(percent_slider(&mut b[value], 0.0..=1.0)).changed();
+                        ui.end_row();
+                    }
+                    // Keep it a valid box while typing.
+                    for (lo, hi) in [(0, 2), (1, 3)] {
+                        if b[hi] < b[lo] + 0.005 {
+                            b[hi] = (b[lo] + 0.005).min(1.0);
+                            b[lo] = b[lo].min(b[hi] - 0.005);
+                        }
+                    }
+                }
+                CropMode::None => {}
+            }
+        });
+    if node.crop == CropMode::Content {
+        changed |= ui
+            .checkbox(&mut node.ignore_white_fills, "Ignore white areas")
+            .on_hover_text("White-filled shapes (e.g. page backgrounds) don't count as content")
+            .changed();
+    }
+    if node.crop == CropMode::Manual {
+        ui.label(
+            RichText::new("Fractions of each page as shown; applies to every page.")
+                .weak()
+                .small(),
+        );
+    }
+
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.strong("Colours");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.menu_button("Presets", |ui| {
+                if ui.button("PCB top layer → black").clicked() {
+                    node.recolor = Recolor::pcb_top();
+                    changed = true;
+                    ui.close();
+                }
+                if ui.button("PCB bottom layer → gray").clicked() {
+                    node.recolor = Recolor::pcb_bottom();
+                    changed = true;
+                    ui.close();
+                }
+                if ui.button("Grayscale").clicked() {
+                    node.recolor = Recolor {
+                        mode: RecolorMode::Grayscale,
+                        ..Recolor::default()
+                    };
+                    changed = true;
+                    ui.close();
+                }
+                if ui.button("Original colours").clicked() {
+                    node.recolor = Recolor::default();
+                    changed = true;
+                    ui.close();
+                }
+            });
+        });
+    });
+    let r = &mut node.recolor;
+    Grid::new("pdf_edit_colour")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Change");
+            egui::ComboBox::from_id_salt("recolor_mode")
+                .selected_text(recolor_name(r.mode))
+                .show_ui(ui, |ui| {
+                    for m in [
+                        RecolorMode::Off,
+                        RecolorMode::Single,
+                        RecolorMode::Replace,
+                        RecolorMode::Grayscale,
+                    ] {
+                        changed |= ui
+                            .selectable_value(&mut r.mode, m, recolor_name(m))
+                            .changed();
+                    }
+                });
+            ui.end_row();
+            if r.mode != RecolorMode::Off {
+                ui.label("Apply to");
+                ui.horizontal(|ui| {
+                    changed |= ui.checkbox(&mut r.fills, "Fills & text").changed();
+                    changed |= ui.checkbox(&mut r.strokes, "Lines").changed();
+                });
+                ui.end_row();
+            }
+            if r.mode == RecolorMode::Single {
+                ui.label("New colour");
+                changed |= ui.color_edit_button_srgb(&mut r.color).changed();
+                ui.end_row();
+            }
+        });
+    if r.mode == RecolorMode::Single {
+        changed |= ui
+            .checkbox(&mut r.keep_white, "Keep white")
+            .on_hover_text("White details (pads, holes, knock-outs) stay white")
+            .changed();
+    }
+    if r.mode == RecolorMode::Replace {
+        changed |= color_rules(ui, r, extras.palette.as_deref().map(Vec::as_slice));
+    }
+    if r.mode != RecolorMode::Off {
+        ui.label(
+            RichText::new("Images and gradients keep their colours.")
+                .weak()
+                .small(),
+        );
+    }
+    changed
+}
+
+/// One row per colour found in the input PDF: tick it to replace it, pick
+/// what it becomes.
+fn color_rules(ui: &mut Ui, r: &mut Recolor, palette: Option<&[PaletteEntry]>) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label("Match within");
+        changed |= ui
+            .add(Slider::new(&mut r.tolerance, 0..=128))
+            .on_hover_text("Per channel, 0–255")
+            .changed();
+    });
+    let Some(palette) = palette else {
+        ui.label(RichText::new("Connect a PDF to list its colours.").weak());
+        return changed;
+    };
+    ui.label(RichText::new(format!("Colours in the input PDF ({}):", palette.len())).weak());
+    let swatch = |ui: &mut Ui, rgb: [u8; 3]| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 16.0), egui::Sense::hover());
+        ui.painter()
+            .rect_filled(rect, 3.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+        ui.painter().rect_stroke(
+            rect,
+            3.0,
+            egui::Stroke::new(1.0, Color32::GRAY),
+            egui::StrokeKind::Inside,
+        );
+    };
+    Grid::new("color_rules")
+        .num_columns(4)
+        .spacing([8.0, 4.0])
+        .show(ui, |ui| {
+            for entry in palette.iter().take(32) {
+                let pos = r.rules.iter().position(|rule| rule.from == entry.rgb);
+                let mut on = pos.is_some();
+                if ui.checkbox(&mut on, "").changed() {
+                    match pos {
+                        Some(i) if !on => {
+                            r.rules.remove(i);
+                        }
+                        None if on => r.rules.push(ColorRule {
+                            from: entry.rgb,
+                            to: [0, 0, 0],
+                        }),
+                        _ => {}
+                    }
+                    changed = true;
+                }
+                swatch(ui, entry.rgb);
+                match r.rules.iter_mut().find(|rule| rule.from == entry.rgb) {
+                    Some(rule) => {
+                        ui.horizontal(|ui| {
+                            ui.label("→");
+                            changed |= ui.color_edit_button_srgb(&mut rule.to).changed();
+                        });
+                    }
+                    None => {
+                        ui.label(RichText::new("unchanged").weak());
+                    }
+                }
+                let hex = format!(
+                    "#{:02x}{:02x}{:02x}",
+                    entry.rgb[0], entry.rgb[1], entry.rgb[2]
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "{hex} · {} fill / {} line",
+                        entry.fills, entry.strokes
+                    ))
+                    .weak()
+                    .small(),
+                );
+                ui.end_row();
+            }
+        });
+    // Rules for colours no longer in the input (e.g. after changing files).
+    let orphans: Vec<usize> = (0..r.rules.len())
+        .filter(|&i| !palette.iter().any(|e| e.rgb == r.rules[i].from))
+        .collect();
+    if !orphans.is_empty() {
+        ui.label(RichText::new("Rules for colours not in this PDF:").weak());
+        let mut remove = None;
+        for i in orphans {
+            ui.horizontal(|ui| {
+                swatch(ui, r.rules[i].from);
+                ui.label("→");
+                changed |= ui.color_edit_button_srgb(&mut r.rules[i].to).changed();
+                if ui.small_button("🗑").clicked() {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            r.rules.remove(i);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn crop_name(c: CropMode) -> &'static str {
+    match c {
+        CropMode::Content => "Detected content",
+        CropMode::Manual => "Manual box",
+        CropMode::None => "Keep page size",
+    }
+}
+
+fn recolor_name(m: RecolorMode) -> &'static str {
+    match m {
+        RecolorMode::Off => "Nothing",
+        RecolorMode::Single => "Everything to one colour",
+        RecolorMode::Replace => "Replace chosen colours",
+        RecolorMode::Grayscale => "Grayscale",
     }
 }
 

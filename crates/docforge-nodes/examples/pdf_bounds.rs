@@ -1,11 +1,11 @@
-//! Prints what PDF Input finds on each page of a PDF: the content box and
-//! the images painted on it. With a second argument, also saves the PDF
-//! cropped to its content.
+//! Prints what PDF Edit's "crop to content" finds on each page of a PDF —
+//! the content box — plus the images painted on it. With a second argument,
+//! also saves the PDF cropped to its content.
 //!
 //!     cargo run --release -p docforge-nodes --example pdf_bounds -- file.pdf [cropped.pdf]
 
 use docforge_core::EvalContext;
-use docforge_nodes::PdfInput;
+use docforge_nodes::{PdfEdit, PdfInput};
 
 fn main() {
     let mut args = std::env::args_os().skip(1);
@@ -13,7 +13,10 @@ fn main() {
         .next()
         .expect("usage: pdf_bounds <file.pdf> [cropped.pdf]");
     let save_to = args.next();
-    let doc = match PdfInput::new(path).load(&EvalContext::new()) {
+    let doc = match PdfInput::new(path)
+        .load(&EvalContext::new())
+        .and_then(|loaded| PdfEdit::default().apply(&loaded))
+    {
         Ok(doc) => doc,
         Err(err) => {
             eprintln!("{err}");

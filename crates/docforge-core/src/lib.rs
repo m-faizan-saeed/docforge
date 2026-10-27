@@ -34,7 +34,7 @@ pub use graph::{
 pub use group::{GROUP_VALUE_PORT, GroupInput, GroupNode, GroupOutput};
 pub use node::{EvalContext, Inputs, Node, NodeType, SaveParams};
 pub use raster::RasterImage;
-pub use registry::{CreateFn, DeserializeFn, NodeDescriptor, NodeRegistry};
+pub use registry::{CreateFn, DeserializeFn, Migration, NodeDescriptor, NodeRegistry};
 pub use value::{PdfDocument, PdfImageInfo, PdfPageInfo, PortSpec, PortType, Value};
 
 /// Re-exported so node crates convert to and from the exact `image` version

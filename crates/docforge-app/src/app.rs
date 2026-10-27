@@ -10,16 +10,18 @@ use docforge_core::{
     RasterImage, Value,
 };
 use docforge_nodes::{
-    EnhanceImage, InputImage, OutputImage, PrintLayout,
+    EnhanceImage, InputImage, OutputImage, PdfEdit, PrintLayout,
     enhance::{step_input_key, step_output_key},
     input_image, output_image,
+    pdf::{self as pdfkit, PageBox},
+    pdf_edit::{CropMode, PaletteEntry},
 };
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText, ViewportCommand};
 
 use crate::{
     bounds,
     canvas::{self, CanvasEvent, CanvasState, Status},
-    inspector,
+    handles, inspector,
     pdf_view::PdfView,
     thumbs::Thumbnails,
     viewport::Viewport,
@@ -65,6 +67,8 @@ pub struct DocforgeApp {
     detected: Option<DetectedPage>,
     /// Probe requests sent with the last job.
     submitted_probes: Vec<(NodeId, String)>,
+    /// Colours of the last PDF shown in a PDF Edit inspector.
+    palette: Option<PaletteCache>,
     /// Preview this node regardless of the selection.
     pinned: Option<NodeId>,
     show_input: bool,
@@ -89,6 +93,9 @@ struct SmokeTest {
 
 /// An image and the page found in it (normalised corners), if any.
 type DetectedPage = (Arc<RasterImage>, Option<[[f32; 2]; 4]>);
+
+/// A document and the vector colours found in it.
+type PaletteCache = (Arc<PdfDocument>, Arc<Vec<PaletteEntry>>);
 
 /// An action waiting for "discard unsaved changes?" confirmation.
 enum Pending {
@@ -117,6 +124,7 @@ impl DocforgeApp {
             edit_step: None,
             detected: None,
             submitted_probes: Vec::new(),
+            palette: None,
             pinned: None,
             show_input: false,
             canvas: CanvasState::default(),
@@ -389,8 +397,10 @@ impl DocforgeApp {
     /// Intermediate images the preview needs (while editing a step's geometry).
     fn wanted_probes(&self) -> Vec<(NodeId, String)> {
         match self.edit_step {
-            Some((node, step)) => vec![(node, step_input_key(step)), (node, step_output_key(step))],
-            None => Vec::new(),
+            Some((node, step)) if self.graph.node_as::<EnhanceImage>(node).is_some() => {
+                vec![(node, step_input_key(step)), (node, step_output_key(step))]
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -453,6 +463,33 @@ impl DocforgeApp {
             NodeResult::Ready(values) => values.iter().find_map(Value::as_document),
             _ => None,
         }
+    }
+
+    /// The document arriving at the node's first connected input.
+    fn input_document_of(&self, id: NodeId) -> Option<&Arc<PdfDocument>> {
+        let edge = self.graph.edges().iter().find(|e| e.to.node == id)?;
+        let index = self
+            .graph
+            .node(edge.from.node)?
+            .outputs()
+            .iter()
+            .position(|p| p.name == edge.from.port)?;
+        match self.results.as_ref()?.nodes.get(&edge.from.node)? {
+            NodeResult::Ready(values) => values.get(index)?.as_document(),
+            _ => None,
+        }
+    }
+
+    /// The vector colours of `doc`, computed once per document.
+    fn palette_of(&mut self, doc: &Arc<PdfDocument>) -> Arc<Vec<PaletteEntry>> {
+        if let Some((seen, colours)) = &self.palette
+            && Arc::ptr_eq(seen, doc)
+        {
+            return Arc::clone(colours);
+        }
+        let colours = Arc::new(docforge_nodes::pdf_edit::palette(&doc.bytes));
+        self.palette = Some((Arc::clone(doc), Arc::clone(&colours)));
+        colours
     }
 
     /// The image arriving at the node's first connected input.
@@ -956,10 +993,18 @@ impl DocforgeApp {
                     .edit_step
                     .filter(|(node, _)| *node == id)
                     .map(|(_, s)| s);
+                let palette = if kind == PdfEdit::KIND {
+                    self.input_document_of(id)
+                        .cloned()
+                        .map(|doc| self.palette_of(&doc))
+                } else {
+                    None
+                };
                 let extras = inspector::Extras {
                     pdf: self.node_document(id).cloned(),
                     thumbs: &mut self.thumbs,
                     edit_step: &mut edit_step,
+                    palette,
                 };
                 if inspector::node_params(ui, &mut self.graph, id, &self.registry, extras) {
                     self.touch();
@@ -1044,6 +1089,10 @@ impl DocforgeApp {
             self.edit_preview(ui, node, step, frame);
             return;
         }
+        if let Some(node) = self.pdf_crop_target(target) {
+            self.pdf_crop_preview(ui, node);
+            return;
+        }
         if !self.show_input
             && let Some(doc) = target.and_then(|id| self.node_document(id)).cloned()
         {
@@ -1089,6 +1138,74 @@ impl DocforgeApp {
             .get(step)?
             .effect;
         Some((node, step, bounds::editable(effect)?))
+    }
+
+    /// A PDF Edit node whose crop is being adjusted on the preview.
+    fn pdf_crop_target(&self, target: Option<NodeId>) -> Option<NodeId> {
+        let (node, _) = self.edit_step?;
+        (Some(node) == target && self.graph.node_as::<PdfEdit>(node).is_some()).then_some(node)
+    }
+
+    /// The preview while adjusting a PDF Edit crop: the *incoming* page with
+    /// a crop box. Dragging it switches the node to a manual box.
+    fn pdf_crop_preview(&mut self, ui: &mut egui::Ui, node: NodeId) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("✥ Adjusting the crop").strong());
+            ui.label(
+                RichText::new("Drag the edges or corners; drag inside to move. The box applies to every page.")
+                    .weak(),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Done").on_hover_text("Esc").clicked() {
+                    self.edit_step = None;
+                }
+            });
+        });
+        let Some(input) = self.input_document_of(node).cloned() else {
+            ui.label(RichText::new("Connect a PDF to this node first.").weak());
+            return;
+        };
+        let settings = self
+            .graph
+            .node_as::<PdfEdit>(node)
+            .expect("checked")
+            .clone();
+        let page = self.pdf_view.page();
+        let page_box = pdfkit::page_boxes(&input)
+            .get(page)
+            .copied()
+            .unwrap_or(PageBox {
+                crop: [0.0, 0.0, 1.0, 1.0],
+                rotation: 0,
+            });
+        // The box as currently set, in fractions of the displayed page.
+        let mut rect = match settings.crop {
+            CropMode::Manual => settings.manual_box,
+            CropMode::Content => self
+                .node_document(node)
+                .and_then(|out| out.page_info.get(page)?.content_box)
+                .map_or([0.0, 0.0, 1.0, 1.0], |b| {
+                    pdfkit::page_to_displayed(b, page_box)
+                }),
+            CropMode::None => [0.0, 0.0, 1.0, 1.0],
+        };
+        let graph = &mut self.graph;
+        let mut changed = false;
+        self.pdf_view
+            .show_with_overlay(ui, &input, &mut |ui, frame| {
+                let id = ui.make_persistent_id(("pdf_crop", node.0));
+                let accent = Color32::from_rgb(80, 200, 255);
+                if handles::rect(ui, frame, id, &mut rect, accent, true) {
+                    let _ = graph.edit_node::<PdfEdit, _>(node, |n| {
+                        n.crop = CropMode::Manual;
+                        n.manual_box = rect.map(|v| v.clamp(0.0, 1.0));
+                    });
+                    changed = true;
+                }
+            });
+        if changed {
+            self.touch();
+        }
     }
 
     fn probe_image(&self, node: NodeId, key: String) -> Option<Arc<RasterImage>> {

@@ -13,7 +13,7 @@ use hayro::{
     hayro_syntax::Pdf, vello_cpu::color::palette::css::WHITE,
 };
 
-use crate::viewport::Viewport;
+use crate::viewport::{Overlay, Viewport};
 
 /// Logical units per inch: at 100% zoom a page appears roughly life-size.
 const LOGICAL_DPI: f32 = 96.0;
@@ -83,7 +83,32 @@ impl PdfView {
         self.requested.is_some()
     }
 
+    /// The page being shown (0-based).
+    pub fn page(&self) -> usize {
+        self.page
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui, doc: &Arc<PdfDocument>) {
+        self.show_inner(ui, doc, None);
+    }
+
+    /// Like [`PdfView::show`], with interactive handles drawn over the page
+    /// (the frame covers the page as displayed, rotation applied).
+    pub fn show_with_overlay(
+        &mut self,
+        ui: &mut egui::Ui,
+        doc: &Arc<PdfDocument>,
+        overlay: Overlay<'_>,
+    ) {
+        self.show_inner(ui, doc, Some(overlay));
+    }
+
+    fn show_inner(
+        &mut self,
+        ui: &mut egui::Ui,
+        doc: &Arc<PdfDocument>,
+        overlay: Option<Overlay<'_>>,
+    ) {
         if let Some(latest) = self.results.try_iter().last() {
             self.shown = Some(latest);
             self.requested = None;
@@ -148,8 +173,14 @@ impl PdfView {
                 let [w, h] = doc.pages_mm.get(*page).copied().unwrap_or_default();
                 let facts = format!("{w:.0} × {h:.0} mm · rendered at {dpi:.0} dpi");
                 let image = Arc::clone(image);
-                self.viewport
-                    .show_scaled(ui, Some(&image), LOGICAL_DPI / dpi, Some(facts), "");
+                self.viewport.show_scaled_with_overlay(
+                    ui,
+                    Some(&image),
+                    LOGICAL_DPI / dpi,
+                    Some(facts),
+                    "",
+                    overlay,
+                );
             }
             Some(Rendered {
                 image: Err(err), ..

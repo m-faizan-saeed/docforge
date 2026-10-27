@@ -625,7 +625,8 @@ impl Graph {
 
     /// Rebuilds a graph, validating every edge exactly as [`Graph::connect`]
     /// would, so a hand-edited file cannot smuggle in a cycle or bad types.
-    pub fn from_doc(doc: GraphDoc, registry: &NodeRegistry) -> Result<Self, GraphError> {
+    pub fn from_doc(mut doc: GraphDoc, registry: &NodeRegistry) -> Result<Self, GraphError> {
+        registry.migrate(&mut doc);
         if doc.version > GRAPH_FORMAT_VERSION {
             return Err(GraphError::UnsupportedVersion {
                 found: doc.version,
@@ -735,6 +736,9 @@ impl Graph {
         registry: &NodeRegistry,
         offset: [f32; 2],
     ) -> Result<Vec<(NodeId, NodeId)>, GraphError> {
+        let mut migrated = doc.clone();
+        registry.migrate(&mut migrated);
+        let doc = &migrated;
         if doc.version > GRAPH_FORMAT_VERSION {
             return Err(GraphError::UnsupportedVersion {
                 found: doc.version,

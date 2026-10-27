@@ -90,6 +90,19 @@ impl Viewport {
         self.show_inner(ui, image, 1.0, None, placeholder, Some(overlay));
     }
 
+    /// [`Viewport::show_scaled`] with optional handles on top.
+    pub fn show_scaled_with_overlay(
+        &mut self,
+        ui: &mut egui::Ui,
+        image: Option<&Arc<RasterImage>>,
+        scale: f32,
+        facts: Option<String>,
+        placeholder: &str,
+        overlay: Option<Overlay<'_>>,
+    ) {
+        self.show_inner(ui, image, scale, facts, placeholder, overlay);
+    }
+
     fn show_inner(
         &mut self,
         ui: &mut egui::Ui,

@@ -10,9 +10,10 @@ as JSON project files that can be re-run from the command line.
 
 **Highlights**
 
-- **Six tools**:
+- **Seven tools**:
   - Input Image and PDF Input load files.
   - Enhance Image applies document effects and overlays.
+  - PDF Edit crops PDF pages and changes the colours of vector graphics.
   - Output Image saves images.
   - Print Layout packs pieces onto paper and writes a PDF.
   - Groups nest whole graphs (engine only for now).
@@ -23,7 +24,9 @@ as JSON project files that can be re-run from the command line.
   85.6 × 54 mm.
 - **PDF in, PDF out**:
   - detects the visible content box of PDF pages (vectors, text, images);
-  - crops pages to that box;
+  - crops pages to that box, or to a box you drag on the preview;
+  - recolours vector graphics (e.g. PCB assembly guides: top layer black,
+    bottom layer gray), still as vectors;
   - multiplies vector artwork on a sheet without rasterising it;
   - extracts embedded images for enhancement.
 - **Pure Rust**: `image` for raster files, `lopdf` for writing PDFs, `hayro`
@@ -39,7 +42,7 @@ as JSON project files that can be re-run from the command line.
 4. [Tool reference](#tool-reference)
    - [Input Image](#input-image) · [Output Image](#output-image) ·
      [Enhance Image](#enhance-image) · [Print Layout (PDF)](#print-layout-pdf) ·
-     [PDF Input](#pdf-input) · [Groups](#groups)
+     [PDF Input](#pdf-input) · [PDF Edit](#pdf-edit) · [Groups](#groups)
 5. [Recipes](#recipes)
 6. [Command-line tools](#command-line-tools)
 7. [Project files](#project-files)
@@ -363,36 +366,14 @@ Pieces too big for the paper are shrunk to fit, and the summary says so.
 **Kind:** `pdf_input` · **Outputs:** `pdf`, plus one image port per selected
 embedded image
 
-Loads a PDF, finds the **bounding box of the actual content** on every page,
-and by default crops the pages to it. The output can go straight into Print
-Layout's `pdfs` input to multiply the artwork.
+Loads a PDF and passes it on **unchanged**, with a description of every page
+(size, rotation, embedded images) and any embedded images you tick. To crop
+it or change its colours, connect a [PDF Edit](#pdf-edit) node.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `path` | — | PDF file |
-| `crop_to_content` | `true` | Set each page's MediaBox/CropBox to its content box. Drawing commands are untouched, so the art stays vector. Off = the file passes through unchanged |
-| `bounds` | `"content"` | `content` (detected), `crop_box` (visible page), `media_box` (full page) |
-| `padding_mm` | `0` | Extra space around the detected content (kept within the page) |
-| `ignore_white_fills` | `true` | Plain-white filled shapes (e.g. full-page backgrounds) don't count as content |
+| `path` | — | PDF file (reloads automatically when it changes on disk) |
 | `selected_images` | `[]` | Keys of embedded images to output (see below) |
-
-**How the content box is found.** This builds on the approach in
-`reference-code/pdf-art-grid.rs`: walk the content stream, track the
-transformation matrix, and count a path only when it is actually painted. On
-top of that it handles:
-- embedded forms (followed recursively) and images;
-- exact curve bounds;
-- stroke widths;
-- text, measured from the font's glyph widths;
-- clipping paths and the CropBox;
-- page rotation and page sizes inherited from parent pages.
-
-Against rendered output, vector and image edges agree to within about 0.3 pt
-(0.1 mm). Edges formed by text can be a few points roomier, because the box
-allows for the font's full height; it never cuts into the art.
-
-**Encrypted PDFs** that open without a password are cropped into a plain,
-readable copy.
 
 **Embedded images.** The inspector shows a thumbnail of every image in the PDF
 with a checkbox.
@@ -406,6 +387,76 @@ with a checkbox.
   (placement turn or mirror and page `/Rotate` applied). Their DPI comes from
   the size they're printed at, so they keep their real size when laid out
   again.
+
+> **Older projects:** PDF Input used to crop pages itself. Projects saved
+> back then are updated automatically when loaded: a PDF Edit node with the
+> same crop settings is inserted after the PDF Input, so they produce the
+> same result.
+
+### PDF Edit
+
+**Kind:** `pdf_edit` · **Input:** `pdf` · **Output:** `pdf`
+
+Crops pages and changes the colours of vector graphics. The result is still a
+vector PDF: cropping only changes the page boxes, and recolouring rewrites the
+colour instructions without rasterising anything.
+
+**Crop**
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `crop` | `"content"` | `content` (detected artwork), `manual` (`manual_box`), `none` (keep the page size) |
+| `padding_mm` | `0` | `content`: extra space around the artwork (kept within the page) |
+| `ignore_white_fills` | `true` | `content`: plain-white filled shapes (e.g. full-page backgrounds) don't count as content |
+| `manual_box` | `[0.1, 0.1, 0.9, 0.9]` | `manual`: `[left, top, right, bottom]` as fractions of each page *as displayed*; applies to every page |
+
+- **Adjusting visually:** click **✥ Adjust on preview** to see the *incoming*
+  page with a crop box to drag. With *Detected content*, the box starts at
+  the detected artwork; dragging it switches to a manual box.
+- **How the content box is found.** This builds on
+  `reference-code/pdf-art-grid.rs`: walk the content stream, track the
+  transformation matrix, and count a path only when it is actually painted.
+  On top of that it handles:
+  - embedded forms (followed recursively) and images;
+  - exact curve bounds;
+  - stroke widths;
+  - text, measured from the font's glyph widths;
+  - clipping paths and the CropBox;
+  - page rotation and page sizes inherited from parent pages.
+
+  Against rendered output, vector and image edges agree to within about
+  0.3 pt (0.1 mm). Edges formed by text can be a few points roomier, because
+  the box allows for the font's full height; it never cuts into the art.
+- **Measured on the original colours,** so recolouring cannot change what
+  counts as content.
+- **Blank pages** (in `content` mode) are left as they are and skipped by
+  Print Layout.
+- **Encrypted PDFs** that open without a password are written out as a plain,
+  readable copy.
+
+**Colours** (`recolor`)
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `mode` | `"off"` | `off`, `single` (everything → `color`), `replace` (by `rules`), `grayscale` |
+| `color` | `[0,0,0]` | `single`: the new colour |
+| `keep_white` | `true` | `single`: near-white stays white (pads, holes, knock-outs) |
+| `rules` | `[]` | `replace`: `{"from": [r,g,b], "to": [r,g,b]}` pairs, tried in order |
+| `tolerance` | `24` | `replace`: how far (per channel, 0–255) a colour may be from `from` and still match |
+| `fills` | `true` | Change fill colours (this includes most text) |
+| `strokes` | `true` | Change line colours |
+
+- **Picking colours:** in *Replace chosen colours* mode, the inspector lists
+  every colour used in the incoming PDF, with a swatch and how often it is
+  used. Tick a colour and pick what it becomes.
+- **Presets:** *PCB top layer → black* and *PCB bottom layer → gray* (both
+  keep white), *Grayscale*, *Original colours*.
+- **Where colours are changed:** the colour instructions of every page,
+  embedded form and coloured pattern. Gray, RGB, CMYK, ICC, Lab, palette and
+  spot colours are understood.
+- **Untouched colours stay exactly as they were,** including spot colours.
+- **Not recoloured:** images and gradient fills (shadings); the summary says
+  how many were left.
 
 ### Groups
 
@@ -446,15 +497,25 @@ one sheet and packs it together.
 
 ### Multiply vector artwork (PCB layouts, labels, stickers)
 
-**PDF Input → Print Layout (`pdfs` input)**
+**PDF Input → PDF Edit → Print Layout (`pdfs` input)**
 
-1. PDF Input crops the page to the artwork. Check the size in the preview
+1. PDF Edit crops the page to the artwork. Check the size in the preview
    summary, e.g. *"cropped to content 99.6 × 54.8 mm"*.
 2. In Print Layout tick **Fill sheet** under *PDF artwork*. The artwork stays
    vector and is printed 1:1.
 
 `reference-code/Simple SMPS.pdf` gives 7 copies on landscape A4 in a 36 KB
 file. Use *Cutting lines → None* if the art has its own outline.
+
+### PCB assembly guide (top layer black, bottom layer gray)
+
+- **Both layers in one PDF** (e.g. red silkscreen and black tracks):
+  **PDF Input → PDF Edit**. Set *Colours → Replace chosen colours*, tick the
+  silkscreen colour → black and the track colour → gray. With
+  `reference-code/Simple SMPS.pdf` this gives black component outlines over
+  gray tracks, cropped to the board, still vector.
+- **One PDF per layer:** recolour each with its own PDF Edit node, using the
+  *PCB top layer → black* and *PCB bottom layer → gray* presets.
 
 ### Enhance images embedded in a PDF
 
@@ -493,6 +554,7 @@ Built binaries end up in `target/release/examples/<name>`.
 | `detect_page` | `detect_page <photo>` | Print the page corners *Crop to document* finds |
 | `bench_effects` | `bench_effects [image]` | Time every Enhance effect (12 MP synthetic page by default) |
 | `pdf_bounds` | `pdf_bounds <file.pdf> [cropped.pdf]` | Show each page's content box and images; optionally save the cropped PDF |
+| `pdf_edit` | `pdf_edit <file.pdf> [out.pdf] [top\|bottom\|gray\|none]` | List the vector colours; optionally save a copy cropped to content and recoloured with a PCB preset |
 | `pdf_images` | `pdf_images <file.pdf> [out-dir]` | List embedded images; optionally extract all of them as PNG |
 
 ### run_graph
@@ -560,10 +622,27 @@ cargo run --release -p docforge-nodes --example pdf_bounds -- art.pdf art-croppe
 Example output:
 
 ```
-PDF 1 page · cropped to content 99.6 × 54.8 mm (was at 51.9, 232.3 mm on the page) · 2314 paths
+PDF 1 page · cropped to content 99.6 × 54.8 mm
 
 page 1: crop box [147.22775, 658.5102, 429.62735, 813.9048] pt, rotation 0°
   content: [147.23, 658.51, 429.63, 813.90] pt = 99.62 × 54.82 mm at (51.94, 232.31) mm
+```
+
+### pdf_edit
+
+```sh
+cargo run --release -p docforge-nodes --example pdf_edit -- board.pdf                  # list colours
+cargo run --release -p docforge-nodes --example pdf_edit -- board.pdf top.pdf top      # black
+cargo run --release -p docforge-nodes --example pdf_edit -- board.pdf bottom.pdf bottom # gray
+```
+
+```
+colours used (fills / strokes):
+  #ff0000       8 / 1640
+  #000000     227 / 471
+  #ffffff     200 / 200
+  #00ff00       0 / 4
+PDF 1 page · cropped to content 99.6 × 54.8 mm · 2350 colours changed
 ```
 
 ### pdf_images
@@ -631,6 +710,7 @@ between them.
 | `enhance_image` | `image` | `image` |
 | `print_layout` | `images` (multi), `pdfs` (multi) | `pdf` |
 | `pdf_input` | — | `pdf`, + one per `selected_images` key |
+| `pdf_edit` | `pdf` | `pdf` |
 | `group_input` | — | `value` |
 | `group_output` | `value` | `value` |
 
@@ -704,7 +784,9 @@ Useful entry points:
 | `Graph::sync_from_doc` | Update a graph from a snapshot, keeping the caches of unchanged nodes |
 | `Graph::{copy_nodes, paste, duplicate}` | Copy part of a graph (as a `GraphDoc`), paste it under fresh ids, or duplicate nodes with their wires; pasting is all-or-nothing |
 | `Graph::probe` / `Node::probe` | Ask a node for an intermediate value from its last run, e.g. Enhance Image's `step_input/N` and `step_output/N` |
-| `InputImage::load`, `OutputImage::save`, `EnhanceImage::process`, `PrintLayout::build_with_pdfs`, `PdfInput::load` | Use a tool directly, without a graph |
+| `InputImage::load`, `OutputImage::save`, `EnhanceImage::process`, `PrintLayout::build_with_pdfs`, `PdfInput::load`, `PdfEdit::apply` | Use a tool directly, without a graph |
+| `docforge_nodes::pdf_edit::palette` | The vector colours used in a PDF |
+| `NodeRegistry::register_migration` | Update old saved graphs on load (e.g. when a tool's job moves to another node) |
 | `docforge_nodes::pdf_input::images::{list, extract}` | List and decode images embedded in a PDF |
 
 ### Adding a new tool
@@ -827,6 +909,9 @@ DOCFORGE_SCREENSHOT=shot.png DOCFORGE_SELECT=1 ./target/release/docforge project
   pipeline, copy and paste or duplicate it instead.
 - **Inline images** in PDFs (images written directly into the page content,
   typically tiny icons) are counted but not extracted.
+- **Recolouring** leaves images and gradient fills (shadings) in their
+  colours. Spot colours (Separation/DeviceN) are matched by an approximate
+  gray from their tint.
 - **Text content boxes** use the font's full height, so they can be a few
   points roomier than the visible glyphs.
 - **Miter joins:** the content box widens strokes by half their width; very

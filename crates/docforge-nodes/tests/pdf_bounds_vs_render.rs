@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use docforge_core::{EvalContext, PdfDocument};
-use docforge_nodes::PdfInput;
+use docforge_nodes::{PdfEdit, PdfInput};
 use hayro::{
     PixmapSettings, RenderCache, RenderSettings, hayro_interpret::InterpreterSettings,
     hayro_syntax::Pdf, vello_cpu::color::palette::css::WHITE,
@@ -24,7 +24,9 @@ fn load(name: &str) -> PdfDocument {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(name);
-    PdfInput::new(path).load(&EvalContext::new()).unwrap()
+    let loaded = PdfInput::new(path).load(&EvalContext::new()).unwrap();
+    // Detected-content crop: the measured boxes under test.
+    PdfEdit::default().apply(&loaded).unwrap()
 }
 
 /// Bounds of non-white pixels, in page points, or `None` for a blank page.

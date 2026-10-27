@@ -1,12 +1,13 @@
 //! End-to-end: the user's PCB layout (`simple-smps.pdf`, the reference grid
-//! tool's input) through PDF Input → Print Layout with "fill sheet", checked
+//! tool's input) through PDF Input → PDF Edit (crop to content) → Print
+//! Layout with "fill sheet", checked
 //! by rendering the result with `hayro`.
 
 use std::path::Path;
 
 use docforge_core::{EvalContext, Graph, PdfDocument};
 use docforge_nodes::{
-    PdfInput, PrintLayout, pdf_input,
+    PdfEdit, PdfInput, PrintLayout, pdf_edit, pdf_input,
     print::{self, CutMarks, PrintItem},
 };
 use hayro::{
@@ -21,8 +22,11 @@ fn layout_smps(layout: PrintLayout) -> PdfDocument {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/simple-smps.pdf");
     let mut g = Graph::new();
     let input = g.add(PdfInput::new(path));
+    let crop = g.add(PdfEdit::default());
     let print = g.add(layout);
-    g.connect(input, pdf_input::OUTPUT, print, print::PDF_INPUT)
+    g.connect(input, pdf_input::OUTPUT, crop, pdf_edit::INPUT)
+        .unwrap();
+    g.connect(crop, pdf_edit::OUTPUT, print, print::PDF_INPUT)
         .unwrap();
     let report = g.evaluate(&EvalContext::new());
     assert!(report.is_ok(), "{:?}", report.failed);

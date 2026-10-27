@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{GraphError, GroupInput, GroupNode, GroupOutput, Node, NodeType};
+use crate::{GraphDoc, GraphError, GroupInput, GroupNode, GroupOutput, Node, NodeType};
 
 pub type CreateFn = fn() -> Box<dyn Node>;
 pub type DeserializeFn = fn(serde_json::Value, &NodeRegistry) -> Result<Box<dyn Node>, GraphError>;
@@ -23,7 +23,13 @@ pub struct NodeDescriptor {
 #[derive(Clone, Debug, Default)]
 pub struct NodeRegistry {
     types: BTreeMap<&'static str, NodeDescriptor>,
+    migrations: Vec<Migration>,
 }
+
+/// Rewrites a saved graph from an older layout into the current one, e.g.
+/// when a tool's job is split across two nodes. Must be idempotent: it runs
+/// on every load, including graphs that are already up to date.
+pub type Migration = fn(&mut GraphDoc);
 
 impl NodeRegistry {
     /// An empty registry.
@@ -68,6 +74,20 @@ impl NodeRegistry {
 
     pub fn create(&self, kind: &str) -> Result<Box<dyn Node>, GraphError> {
         Ok((self.descriptor(kind)?.create)())
+    }
+
+    /// Adds a migration applied by [`crate::Graph::from_doc`] (and so by
+    /// `load`/`from_json`) and [`crate::Graph::paste`].
+    pub fn register_migration(&mut self, migration: Migration) -> &mut Self {
+        self.migrations.push(migration);
+        self
+    }
+
+    /// Brings `doc` up to date with every registered migration.
+    pub fn migrate(&self, doc: &mut GraphDoc) {
+        for migration in &self.migrations {
+            migration(doc);
+        }
     }
 
     pub fn deserialize(

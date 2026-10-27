@@ -56,9 +56,14 @@ pub(crate) fn assign_keys(pages: &mut [docforge_core::PdfPageInfo]) {
 
 /// Every distinct (selectable) image, in document order.
 pub fn list(doc: &PdfDocument) -> Vec<ImageEntry> {
+    list_pages(&doc.page_info)
+}
+
+/// [`list`] for page analyses not (yet) wrapped in a document.
+pub fn list_pages(pages: &[docforge_core::PdfPageInfo]) -> Vec<ImageEntry> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for (p, page) in doc.page_info.iter().enumerate() {
+    for (p, page) in pages.iter().enumerate() {
         for info in &page.images {
             if let Some(key) = &info.key
                 && seen.insert(key.clone())
@@ -128,7 +133,7 @@ fn decode(src: &Document, id: ObjectId, max_side: Option<u32>) -> Result<RasterI
     let dim = |k: &[u8]| {
         dict.get(k)
             .ok()
-            .and_then(|o| crate::pdf_input::analyze::num(crate::pdf_input::analyze::deref(src, o)))
+            .and_then(|o| crate::pdf::analyze::num(crate::pdf::analyze::deref(src, o)))
             .unwrap_or(0.0)
     };
     let (w, h) = (dim(b"Width"), dim(b"Height"));
