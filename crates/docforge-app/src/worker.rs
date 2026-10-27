@@ -27,6 +27,9 @@ pub struct Job {
     pub rev: u64,
     pub doc: GraphDoc,
     pub base_dir: Option<PathBuf>,
+    /// Auxiliary values to collect after evaluating (see `Node::probe`),
+    /// e.g. the image an Enhance step receives, for the bounds editor.
+    pub probes: Vec<(NodeId, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -47,6 +50,7 @@ pub struct EvalResult {
     pub elapsed: Duration,
     pub cancelled: bool,
     pub sync_error: Option<String>,
+    pub probes: HashMap<(NodeId, String), Value>,
 }
 
 pub struct Evaluator {
@@ -145,6 +149,7 @@ impl Worker {
             elapsed: Duration::ZERO,
             cancelled: false,
             sync_error: None,
+            probes: HashMap::new(),
         };
         if let Err(err) = graph.sync_from_doc(&job.doc, &self.registry) {
             result.sync_error = Some(err.to_string());
@@ -162,6 +167,11 @@ impl Worker {
         result.recomputed = report.recomputed.len();
         result.elapsed = start.elapsed();
 
+        for (id, key) in job.probes {
+            if let Some(value) = graph.probe(id, &key) {
+                result.probes.insert((id, key), value);
+            }
+        }
         for (id, node) in graph.nodes() {
             let status = match graph.status(id) {
                 Some(NodeStatus::Ready(values)) => NodeResult::Ready(values.to_vec()),

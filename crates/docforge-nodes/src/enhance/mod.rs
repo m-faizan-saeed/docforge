@@ -353,6 +353,32 @@ impl Node for EnhanceImage {
             self.cache = prev.cache.clone();
         }
     }
+
+    /// `step_input/N` and `step_output/N` (0-based): the image step N
+    /// received and produced in the last evaluation, so editors can draw
+    /// handles in that step's coordinates.
+    fn probe(&self, key: &str) -> Option<Value> {
+        let (what, index) = key.split_once('/')?;
+        let index: usize = index.parse().ok()?;
+        let cache = self.cache.get();
+        let image = match what {
+            "step_input" if index == 0 => cache.input?,
+            "step_input" => Arc::clone(&cache.done.get(index - 1)?.1),
+            "step_output" => Arc::clone(&cache.done.get(index)?.1),
+            _ => return None,
+        };
+        Some(Value::Image(image))
+    }
+}
+
+/// Probe key for the image step `index` receives.
+pub fn step_input_key(index: usize) -> String {
+    format!("step_input/{index}")
+}
+
+/// Probe key for the image step `index` produces.
+pub fn step_output_key(index: usize) -> String {
+    format!("step_output/{index}")
 }
 
 impl NodeType for EnhanceImage {
@@ -527,6 +553,35 @@ mod tests {
                 effect.name()
             );
         }
+    }
+
+    #[test]
+    fn probes_expose_each_steps_input_and_output() {
+        let mut g = Graph::new();
+        let node = EnhanceImage::new([
+            Effect::Rotate(Rotate { quarter_turns: 1 }),
+            Effect::Grayscale,
+        ]);
+        let id = g.add(node);
+        assert!(
+            g.probe(id, &step_input_key(0)).is_none(),
+            "nothing before evaluation"
+        );
+
+        let input = sample();
+        g.node_as::<EnhanceImage>(id)
+            .unwrap()
+            .process(&input, &EvalContext::new())
+            .unwrap();
+        let img = |key: String| g.probe(id, &key).unwrap().as_image().unwrap().clone();
+        assert!(Arc::ptr_eq(&img(step_input_key(0)), &input));
+        assert_eq!(img(step_output_key(0)).dimensions(), (90, 120), "rotated");
+        assert!(Arc::ptr_eq(
+            &img(step_input_key(1)),
+            &img(step_output_key(0))
+        ));
+        assert!(g.probe(id, &step_output_key(2)).is_none());
+        assert!(g.probe(id, "nonsense").is_none());
     }
 
     #[test]

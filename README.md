@@ -125,11 +125,15 @@ All panels can be resized by dragging their borders.
 |---|---|
 | Add a node | Right-click on empty canvas, or use the **Add** menu |
 | Select a node | Click it |
-| Move a node | Drag it |
+| Select several | **Ctrl/Shift-click** to add or remove nodes, **Shift-drag** on empty canvas for a selection box (add **Ctrl** to keep the current selection), or **Ctrl+A** |
+| Move nodes | Drag a node; dragging a selected node moves the whole selection |
+| Duplicate | **Ctrl+D**, or right-click a node → *Duplicate*. Copies keep the wires among them and the wires feeding them, so a duplicated chain receives the same input immediately |
+| Copy / cut / paste | **Ctrl+C / Ctrl+X / Ctrl+V** (also in the **Edit** menu). Nodes travel through the system clipboard as JSON, so they paste into another project or another docforge window; pasted nodes are not reconnected to outside nodes |
+| Clone the whole graph | **Ctrl+A**, then **Ctrl+D** (or copy into another project) |
 | Connect | Drag from an output port (right side) to an input port (left side), or the other way round |
 | Detach a wire | Drag a connected input port away; drop it on another port to reconnect it, or anywhere else to remove it |
 | Disconnect | Right-click an input port |
-| Delete a node | Select it and press **Delete** or **Backspace**, or right-click it → *Delete node* |
+| Delete nodes | Select them and press **Delete** or **Backspace**, or right-click → *Delete* |
 | Pan | Drag empty space |
 | Zoom | Scroll wheel or pinch |
 
@@ -161,6 +165,26 @@ coordinates and RGBA value of the pixel under the cursor.
 - **Sharpness when zoomed:** pages re-render at higher resolution in the
   background as you zoom in, so vector art stays sharp.
 
+### Editing positions and bounds on the preview
+
+Settings that are positions or areas can be edited by dragging handles on
+the preview instead of typing numbers. In Enhance Image, click **✥** on a
+step's card:
+
+| Step | Handles | Shown on |
+|---|---|---|
+| Crop to document | The four page corners. While detection is automatic, the detected page is shown dashed; dragging a corner switches to manual corners | The image the step receives |
+| Crop | A crop box with 8 resize grips; drag inside to move it. The area that will be cut away is dimmed | The image the step receives |
+| Rectangle | Resize grips and drag-to-move | The step's result |
+| Line | Both ends, plus a middle grip that moves the whole line | The step's result |
+| Text watermark | A cross at the text's centre | The step's result |
+
+- **Which image:** handles are always drawn on the exact image that step works
+  on, so they line up even after earlier crops or rotations.
+- **Live updates:** drag at any zoom; only that step and the steps after it
+  are recomputed while you drag.
+- **Leaving edit mode:** press **Done** or **Esc**, or select another node.
+
 ### Files, projects and shortcuts
 
 | Shortcut | Action |
@@ -169,7 +193,11 @@ coordinates and RGBA value of the pixel under the cursor.
 | **Ctrl+O** | Open project |
 | **Ctrl+S** | Save project |
 | **Ctrl+Shift+S** | Save project as… |
-| **Delete / Backspace** | Delete the selected node |
+| **Ctrl+D** | Duplicate the selected nodes |
+| **Ctrl+C / Ctrl+X / Ctrl+V** | Copy / cut / paste nodes |
+| **Ctrl+A** | Select all nodes |
+| **Delete / Backspace** | Delete the selected nodes |
+| **Esc** | Leave preview edit mode |
 
 - **File → Open image…** or **dropping an image** on the window puts it into
   the selected Input Image node, else the first empty one, else a new node.
@@ -674,6 +702,8 @@ Useful entry points:
 | `Graph::{output, outputs, status, failures}` | Read results and errors |
 | `Graph::{save, load, to_json, from_json}` | Projects (loading needs `docforge_nodes::registry()`) |
 | `Graph::sync_from_doc` | Update a graph from a snapshot, keeping the caches of unchanged nodes |
+| `Graph::{copy_nodes, paste, duplicate}` | Copy part of a graph (as a `GraphDoc`), paste it under fresh ids, or duplicate nodes with their wires; pasting is all-or-nothing |
+| `Graph::probe` / `Node::probe` | Ask a node for an intermediate value from its last run, e.g. Enhance Image's `step_input/N` and `step_output/N` |
 | `InputImage::load`, `OutputImage::save`, `EnhanceImage::process`, `PrintLayout::build_with_pdfs`, `PdfInput::load` | Use a tool directly, without a graph |
 | `docforge_nodes::pdf_input::images::{list, extract}` | List and decode images embedded in a PDF |
 
@@ -688,8 +718,15 @@ Useful entry points:
 4. Register it in `register_all` (`crates/docforge-nodes/src/lib.rs`).
 
 It then appears in the app's Add menu, saves and loads in projects, and gets a
-generic JSON settings editor. For a proper settings panel, add a case to
+generic JSON settings editor. It can also be duplicated and copied like any
+other node. For a proper settings panel, add a case to
 `inspector::node_params` in `crates/docforge-app/src/inspector.rs`.
+
+To make positions or areas editable on the preview, use the handle widgets in
+`crates/docforge-app/src/handles.rs`: `point`, `line`, `rect` and `quad`.
+They work in normalised image coordinates. Hook them up in
+`crates/docforge-app/src/bounds.rs`. If the handles must be drawn on an
+intermediate image, expose it from the node through `Node::probe`.
 
 ---
 
@@ -732,7 +769,7 @@ reference-code/      Original grid tool and sample PDFs
 ## Development and testing
 
 ```sh
-cargo test --workspace                          # all tests (~120)
+cargo test --workspace                          # all tests (~130)
 cargo test -p docforge-nodes pdf_input          # one area
 cargo clippy --workspace --all-targets          # lints (kept warning-free)
 cargo fmt --all                                 # formatting
@@ -761,7 +798,10 @@ DOCFORGE_SCREENSHOT=shot.png DOCFORGE_SELECT=1 ./target/release/docforge project
 - `DOCFORGE_SCREENSHOT`: once evaluation, PDF rendering and thumbnails have
   finished, save a PNG of the window and exit.
 - `DOCFORGE_SELECT`: select the node with this id first, so its panel and
-  preview are shown.
+  preview are shown. A comma-separated list selects several nodes.
+- `DOCFORGE_DUPLICATE=1`: duplicate the selection at start-up, as Ctrl+D does.
+- `DOCFORGE_EDIT_STEP=N`: open preview editing for step *N* (0-based) of the
+  selected Enhance Image node.
 
 ---
 
@@ -783,7 +823,8 @@ DOCFORGE_SCREENSHOT=shot.png DOCFORGE_SELECT=1 ./target/release/docforge project
 
 ## Known limitations
 
-- **Groups** can't yet be created or edited on the canvas.
+- **Groups** can't yet be created or edited on the canvas. To reuse part of a
+  pipeline, copy and paste or duplicate it instead.
 - **Inline images** in PDFs (images written directly into the page content,
   typically tiny icons) are counted but not extracted.
 - **Text content boxes** use the font's full height, so they can be a few

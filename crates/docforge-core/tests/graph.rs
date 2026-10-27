@@ -526,3 +526,116 @@ fn cancelled_nodes_are_retried_not_cached() {
     let report = g.evaluate(&EvalContext::new().with_cancel_flag(flag));
     assert!(report.cancelled && report.recomputed.is_empty());
 }
+
+// ----- copy, paste, duplicate --------------------------------------------------
+
+fn chain() -> (Graph, NodeId, NodeId, NodeId) {
+    let mut g = Graph::new();
+    let src = g.add(Solid {
+        color: [10, 20, 30, 255],
+    });
+    let a = g.add(Invert);
+    let b = g.add(Invert);
+    g.connect(src, "image", a, "image").unwrap();
+    g.connect(a, "image", b, "image").unwrap();
+    g.meta_mut(a).unwrap().label = Some("first".into());
+    (g, src, a, b)
+}
+
+#[test]
+fn duplicate_keeps_internal_edges_and_optionally_inputs() {
+    let reg = registry();
+    let (mut g, src, a, b) = chain();
+    let copies = g.duplicate(&[a, b], &reg, [10.0, 20.0], true).unwrap();
+    assert_eq!(copies.len(), 2);
+    let (a2, b2) = (copies[0], copies[1]);
+    assert!(a2 != a && b2 != b && a2 != b2);
+    // Internal edge copied, input from outside kept, originals untouched.
+    let has = |f: NodeId, t: NodeId| g.edges().iter().any(|e| e.from.node == f && e.to.node == t);
+    assert!(has(a2, b2) && has(src, a2) && has(src, a) && has(a, b));
+    assert_eq!(g.edges().len(), 4);
+    // Metadata copied and shifted.
+    assert_eq!(g.meta(a2).unwrap().label.as_deref(), Some("first"));
+    assert_eq!(g.meta(a2).unwrap().position, [10.0, 20.0]);
+
+    g.evaluate(&EvalContext::new());
+    assert_eq!(first_pixel(&g, b2), first_pixel(&g, b));
+
+    // Without inputs, the copy of the chain head is unconnected.
+    let lone = g.duplicate(&[a], &reg, [0.0, 0.0], false).unwrap()[0];
+    assert!(!g.edges().iter().any(|e| e.to.node == lone));
+}
+
+#[test]
+fn copies_are_independent_of_their_originals() {
+    let reg = registry();
+    let (mut g, src, ..) = chain();
+    let copy = g.duplicate(&[src], &reg, [0.0, 0.0], false).unwrap()[0];
+    g.edit_node::<Solid, _>(copy, |s| s.color = [1, 1, 1, 1])
+        .unwrap();
+    assert_eq!(g.node_as::<Solid>(src).unwrap().color, [10, 20, 30, 255]);
+
+    // A group's inner graph is copied deeply, not shared.
+    let group = g.add(invert_group());
+    let group2 = g.duplicate(&[group], &reg, [0.0, 0.0], false).unwrap()[0];
+    g.edit_node::<GroupNode, _>(group2, |grp| {
+        grp.edit_inner(|inner| {
+            inner.add(Solid::default());
+        })
+    })
+    .unwrap();
+    let inner_len = |id| g.node_as::<GroupNode>(id).unwrap().with_inner(|i| i.len());
+    assert_eq!((inner_len(group), inner_len(group2)), (3, 4));
+}
+
+#[test]
+fn copy_paste_through_json_like_a_clipboard() {
+    let reg = registry();
+    let (g, src, a, b) = chain();
+    let clip = serde_json::to_string(&g.copy_nodes(&[src, a, b, NodeId(999)]).unwrap()).unwrap();
+
+    let mut other = Graph::new();
+    other.add(Invert); // occupies id 0, so pasted ids must be fresh
+    let doc: GraphDoc = serde_json::from_str(&clip).unwrap();
+    let first = other.paste(&doc, &reg, [0.0, 0.0]).unwrap();
+    let second = other.paste(&doc, &reg, [50.0, 0.0]).unwrap();
+    assert_eq!(other.len(), 7);
+    assert_eq!(other.edges().len(), 4, "two copies of a two-edge chain");
+    let new_ids: std::collections::HashSet<NodeId> =
+        first.iter().chain(&second).map(|(_, new)| *new).collect();
+    assert_eq!(new_ids.len(), 6);
+    assert!(!new_ids.contains(&NodeId(0)));
+    assert!(
+        other.evaluate(&EvalContext::new()).failed.len() == 1,
+        "only the lone Invert lacks input"
+    );
+}
+
+#[test]
+fn paste_is_all_or_nothing() {
+    let reg = registry();
+    let (g, src, a, _) = chain();
+    let mut doc = g.copy_nodes(&[src, a]).unwrap();
+    doc.edges[0].to.port = "nope".into();
+    let mut target = Graph::new();
+    assert!(matches!(
+        target.paste(&doc, &reg, [0.0, 0.0]),
+        Err(GraphError::UnknownPort { .. })
+    ));
+    assert!(target.is_empty(), "no partial paste");
+
+    let mut doc = g.copy_nodes(&[src]).unwrap();
+    doc.nodes[0].kind = "teleporter".into();
+    assert!(matches!(
+        target.paste(&doc, &reg, [0.0, 0.0]),
+        Err(GraphError::UnknownKind(_))
+    ));
+    assert!(target.is_empty());
+}
+
+#[test]
+fn nodes_without_probes_return_none() {
+    let (g, src, ..) = chain();
+    assert!(g.probe(src, "anything").is_none());
+    assert!(g.probe(NodeId(42), "anything").is_none());
+}

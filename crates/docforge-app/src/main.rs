@@ -3,7 +3,9 @@
 //!     cargo run --release -p docforge-app [project.json | image]
 
 mod app;
+mod bounds;
 mod canvas;
+mod handles;
 mod inspector;
 mod pdf_view;
 mod thumbs;

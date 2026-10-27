@@ -57,6 +57,14 @@ pub trait Node: Any + Send + Sync + SaveParams {
     /// caches can take them over here; stale entries must be validated by the
     /// node itself.
     fn inherit_state(&mut self, _previous: &dyn Node) {}
+
+    /// An auxiliary value from the last evaluation, for editors: e.g. the
+    /// image a particular processing step received, so an overlay can be
+    /// drawn in that step's coordinates. `key` is node-specific; unknown keys
+    /// return `None`.
+    fn probe(&self, _key: &str) -> Option<Value> {
+        None
+    }
 }
 
 impl dyn Node {

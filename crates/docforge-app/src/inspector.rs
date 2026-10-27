@@ -29,6 +29,8 @@ pub struct Extras<'a> {
     /// The node's last PDF output, if any (PDF Input shows its images).
     pub pdf: Option<Arc<PdfDocument>>,
     pub thumbs: &'a mut Thumbnails,
+    /// The step of this node being edited with handles on the preview.
+    pub edit_step: &'a mut Option<usize>,
 }
 
 pub fn node_params(
@@ -50,7 +52,7 @@ pub fn node_params(
             .edit_node::<OutputImage, _>(id, |n| output_image(ui, n, salt))
             .unwrap_or(false),
         k if k == EnhanceImage::KIND => graph
-            .edit_node::<EnhanceImage, _>(id, |n| enhance_image(ui, n))
+            .edit_node::<EnhanceImage, _>(id, |n| enhance_image(ui, n, extras.edit_step))
             .unwrap_or(false),
         k if k == PdfInput::KIND => graph
             .edit_node::<PdfInput, _>(id, |n| pdf_input(ui, n, salt, extras))
@@ -751,7 +753,7 @@ enum StepAction {
     Duplicate(usize),
 }
 
-fn enhance_image(ui: &mut Ui, node: &mut EnhanceImage) -> bool {
+fn enhance_image(ui: &mut Ui, node: &mut EnhanceImage, edit_step: &mut Option<usize>) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.menu_button("➕ Add step", |ui| {
@@ -825,6 +827,18 @@ fn enhance_image(ui: &mut Ui, node: &mut EnhanceImage) -> bool {
                         RichText::new(format!("{}. {}", i + 1, step.effect.name())).strong();
                     ui.label(if step.enabled { title } else { title.weak() });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if crate::bounds::editable(&step.effect).is_some() {
+                            let on = *edit_step == Some(i);
+                            if ui
+                                .selectable_label(on, "✥")
+                                .on_hover_text(
+                                    "Edit on the preview: drag handles instead of typing numbers",
+                                )
+                                .clicked()
+                            {
+                                *edit_step = (!on).then_some(i);
+                            }
+                        }
                         if ui.small_button("🗑").on_hover_text("Remove").clicked() {
                             action = Some(StepAction::Remove(i));
                         }
@@ -852,15 +866,37 @@ fn enhance_image(ui: &mut Ui, node: &mut EnhanceImage) -> bool {
         });
     }
     if let Some(action) = action {
+        // The step being edited on the preview follows its card.
+        let follow = |e: usize, a: usize, b: usize| {
+            if e == a {
+                b
+            } else if e == b {
+                a
+            } else {
+                e
+            }
+        };
         match action {
-            StepAction::Up(i) => node.steps.swap(i, i - 1),
-            StepAction::Down(i) => node.steps.swap(i, i + 1),
+            StepAction::Up(i) => {
+                node.steps.swap(i, i - 1);
+                *edit_step = edit_step.map(|e| follow(e, i, i - 1));
+            }
+            StepAction::Down(i) => {
+                node.steps.swap(i, i + 1);
+                *edit_step = edit_step.map(|e| follow(e, i, i + 1));
+            }
             StepAction::Remove(i) => {
                 node.steps.remove(i);
+                *edit_step = edit_step.and_then(|e| match e.cmp(&i) {
+                    std::cmp::Ordering::Less => Some(e),
+                    std::cmp::Ordering::Equal => None,
+                    std::cmp::Ordering::Greater => Some(e - 1),
+                });
             }
             StepAction::Duplicate(i) => {
                 let copy = node.steps[i].clone();
                 node.steps.insert(i + 1, copy);
+                *edit_step = edit_step.map(|e| if e > i { e + 1 } else { e });
             }
         }
         changed = true;

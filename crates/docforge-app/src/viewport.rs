@@ -3,10 +3,15 @@
 use std::sync::Arc;
 
 use docforge_core::RasterImage;
+
+use crate::handles::ImageFrame;
 use eframe::egui::{
     self, Align2, Color32, ColorImage, FontId, Pos2, Rect, Sense, TextureFilter, TextureHandle,
     TextureOptions, TextureWrapMode, Vec2, pos2, vec2,
 };
+
+/// Draws and handles interactive handles on top of the shown image.
+pub type Overlay<'a> = &'a mut dyn FnMut(&mut egui::Ui, &ImageFrame);
 
 const MIN_ZOOM: f32 = 0.02;
 const MAX_ZOOM: f32 = 32.0;
@@ -69,6 +74,31 @@ impl Viewport {
         facts: Option<String>,
         placeholder: &str,
     ) {
+        self.show_inner(ui, image, scale, facts, placeholder, None);
+    }
+
+    /// Like [`Viewport::show`], then lets `overlay` draw and handle
+    /// interactive handles on top of the image (see [`crate::handles`]).
+    /// Handles take priority over panning where they overlap.
+    pub fn show_with_overlay(
+        &mut self,
+        ui: &mut egui::Ui,
+        image: Option<&Arc<RasterImage>>,
+        placeholder: &str,
+        overlay: Overlay<'_>,
+    ) {
+        self.show_inner(ui, image, 1.0, None, placeholder, Some(overlay));
+    }
+
+    fn show_inner(
+        &mut self,
+        ui: &mut egui::Ui,
+        image: Option<&Arc<RasterImage>>,
+        scale: f32,
+        facts: Option<String>,
+        placeholder: &str,
+        overlay: Option<Overlay<'_>>,
+    ) {
         let Some(image) = image else {
             self.shown = None;
             let rect = ui.available_rect_before_wrap();
@@ -126,6 +156,16 @@ impl Viewport {
                 image_rect,
                 Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)),
                 Color32::WHITE,
+            );
+        }
+
+        if let Some(overlay) = overlay {
+            overlay(
+                ui,
+                &ImageFrame {
+                    rect: image_rect,
+                    clip: rect,
+                },
             );
         }
 

@@ -4,7 +4,7 @@
 //! [`CanvasEvent`]s; the app applies them. That keeps all graph mutation
 //! (and change tracking) in one place.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use docforge_core::{Edge, Graph, NodeId, NodeRegistry, PortRef, PortSpec, PortType};
 use eframe::egui::{
@@ -27,12 +27,30 @@ pub enum Status {
 }
 
 pub enum CanvasEvent {
+    /// Select only this node (`None` clears the selection).
     Select(Option<NodeId>),
+    /// Ctrl/Shift-click: add the node to the selection or remove it.
+    Toggle(NodeId),
+    /// Box selection; `add` keeps what was already selected.
+    SelectMany {
+        ids: Vec<NodeId>,
+        add: bool,
+    },
+    /// Drag a node; the rest of the selection moves along.
     Move(NodeId, Vec2),
-    Connect { from: PortRef, to: PortRef },
+    Connect {
+        from: PortRef,
+        to: PortRef,
+    },
     Disconnect(PortRef),
+    /// Context-menu actions: on the whole selection if the node is part of it.
     Delete(NodeId),
-    Add { kind: &'static str, at: [f32; 2] },
+    Duplicate(NodeId),
+    Copy(NodeId),
+    Add {
+        kind: &'static str,
+        at: [f32; 2],
+    },
 }
 
 pub struct CanvasState {
@@ -43,6 +61,8 @@ pub struct CanvasState {
     menu_at: [f32; 2],
     /// Last known canvas rect, so the app can place new nodes in view.
     view: Rect,
+    /// Screen position where a Shift-drag box selection started.
+    boxing: Option<Pos2>,
 }
 
 enum WireDrag {
@@ -60,6 +80,7 @@ impl Default for CanvasState {
             wire: None,
             menu_at: [0.0, 0.0],
             view: Rect::NOTHING,
+            boxing: None,
         }
     }
 }
@@ -131,7 +152,8 @@ impl CanvasState {
         graph: &Graph,
         registry: &NodeRegistry,
         statuses: &HashMap<NodeId, (Status, Option<String>)>,
-        selected: Option<NodeId>,
+        selection: &BTreeSet<NodeId>,
+        primary: Option<NodeId>,
     ) -> Vec<CanvasEvent> {
         let mut events = Vec::new();
         let (rect, bg) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
@@ -139,8 +161,12 @@ impl CanvasState {
         let painter = ui.painter_at(rect);
         let visuals = ui.visuals().clone();
 
-        // --- background: pan, zoom, deselect, context menu ---
-        if bg.dragged() {
+        // --- background: pan (or Shift-drag box select), zoom, deselect, menu ---
+        let modifiers = ui.input(|i| i.modifiers);
+        if bg.drag_started() && modifiers.shift {
+            self.boxing = bg.interact_pointer_pos();
+        }
+        if bg.dragged() && self.boxing.is_none() {
             self.pan += bg.drag_delta();
         }
         if bg.clicked() {
@@ -234,14 +260,48 @@ impl CanvasState {
                         ui.colored_label(Color32::LIGHT_RED, err);
                     }
                 });
-            if response.drag_started() || response.clicked() {
+            if response.clicked() {
+                events.push(if modifiers.ctrl || modifiers.shift || modifiers.command {
+                    CanvasEvent::Toggle(id)
+                } else {
+                    CanvasEvent::Select(Some(id))
+                });
+            }
+            if response.drag_started() && !selection.contains(&id) {
                 events.push(CanvasEvent::Select(Some(id)));
             }
             if response.dragged() {
                 events.push(CanvasEvent::Move(id, response.drag_delta() / layout.zoom));
             }
             response.context_menu(|ui| {
-                if ui.button("Delete node").clicked() {
+                let many = selection.contains(&id) && selection.len() > 1;
+                let what = if many {
+                    format!("{} nodes", selection.len())
+                } else {
+                    "node".into()
+                };
+                if ui
+                    .button(format!("Duplicate {what}"))
+                    .on_hover_text("Ctrl+D")
+                    .clicked()
+                {
+                    events.push(CanvasEvent::Duplicate(id));
+                    ui.close();
+                }
+                if ui
+                    .button(format!("Copy {what}"))
+                    .on_hover_text("Ctrl+C")
+                    .clicked()
+                {
+                    events.push(CanvasEvent::Copy(id));
+                    ui.close();
+                }
+                ui.separator();
+                if ui
+                    .button(format!("Delete {what}"))
+                    .on_hover_text("Delete")
+                    .clicked()
+                {
                     events.push(CanvasEvent::Delete(id));
                     ui.close();
                 }
@@ -278,8 +338,10 @@ impl CanvasState {
                 4.5 * layout.zoom,
                 status_color(status),
             );
-            let outline = if selected == Some(id) {
-                Stroke::new(2.0, visuals.selection.stroke.color)
+            let outline = if primary == Some(id) {
+                Stroke::new(2.5, visuals.selection.stroke.color)
+            } else if selection.contains(&id) {
+                Stroke::new(2.0, visuals.selection.stroke.color.gamma_multiply(0.7))
             } else {
                 Stroke::new(1.0, status_color(status).gamma_multiply(0.6))
             };
@@ -392,6 +454,27 @@ impl CanvasState {
                     });
                 }
                 self.wire = None;
+            }
+        }
+
+        // --- box selection ---
+        if let Some(start) = self.boxing {
+            let pointer = ui.input(|i| i.pointer.interact_pos()).unwrap_or(start);
+            let area = Rect::from_two_pos(start, pointer);
+            let accent = visuals.selection.stroke.color;
+            painter.rect_filled(area, 2.0, accent.gamma_multiply(0.12));
+            painter.rect_stroke(area, 2.0, Stroke::new(1.0, accent), StrokeKind::Inside);
+            if !ui.input(|i| i.pointer.primary_down()) {
+                let ids = views
+                    .iter()
+                    .filter(|v| area.intersects(v.rect))
+                    .map(|v| v.id)
+                    .collect();
+                events.push(CanvasEvent::SelectMany {
+                    ids,
+                    add: modifiers.ctrl || modifiers.command,
+                });
+                self.boxing = None;
             }
         }
 

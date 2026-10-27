@@ -707,6 +707,119 @@ impl Graph {
         Ok(())
     }
 
+    // ----- copy, paste, duplicate --------------------------------------------
+
+    /// A self-contained copy of `ids` and the edges among them, for the
+    /// clipboard or for duplication. Unknown ids are skipped.
+    pub fn copy_nodes(&self, ids: &[NodeId]) -> Result<GraphDoc, GraphError> {
+        let wanted: HashSet<NodeId> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.contains(*id))
+            .collect();
+        let mut doc = self.to_doc()?;
+        doc.nodes.retain(|n| wanted.contains(&n.id));
+        doc.edges
+            .retain(|e| wanted.contains(&e.from.node) && wanted.contains(&e.to.node));
+        Ok(doc)
+    }
+
+    /// Inserts the nodes of `doc` under fresh ids, shifting their editor
+    /// positions by `offset`, and recreates the edges among them. Returns
+    /// `(old id, new id)` pairs in document order.
+    ///
+    /// All or nothing: if any node or edge is invalid, nothing is inserted.
+    pub fn paste(
+        &mut self,
+        doc: &GraphDoc,
+        registry: &NodeRegistry,
+        offset: [f32; 2],
+    ) -> Result<Vec<(NodeId, NodeId)>, GraphError> {
+        if doc.version > GRAPH_FORMAT_VERSION {
+            return Err(GraphError::UnsupportedVersion {
+                found: doc.version,
+                supported: GRAPH_FORMAT_VERSION,
+            });
+        }
+        // Build every node before touching the graph.
+        let mut built = Vec::with_capacity(doc.nodes.len());
+        for nd in &doc.nodes {
+            let node = registry.deserialize(&nd.kind, nd.params.clone())?;
+            let mut meta = nd.meta.clone();
+            meta.position = [meta.position[0] + offset[0], meta.position[1] + offset[1]];
+            built.push((nd.id, node, meta));
+        }
+        let mut map = Vec::with_capacity(built.len());
+        for (old, node, meta) in built {
+            map.push((old, self.add_node_with_meta(node, meta)));
+        }
+        let new_id = |old: NodeId| map.iter().find(|(o, _)| *o == old).map(|(_, n)| *n);
+        let mut failure = None;
+        for e in &doc.edges {
+            let (Some(from), Some(to)) = (new_id(e.from.node), new_id(e.to.node)) else {
+                failure = Some(GraphError::UnknownNode(e.from.node));
+                break;
+            };
+            if let Err(err) = self.connect(from, &e.from.port, to, &e.to.port) {
+                failure = Some(err);
+                break;
+            }
+        }
+        if let Some(err) = failure {
+            for (_, id) in &map {
+                self.remove_node(*id);
+            }
+            return Err(err);
+        }
+        Ok(map)
+    }
+
+    /// Duplicates `ids` with the edges among them (see [`Graph::paste`]).
+    /// With `keep_inputs`, edges entering the selection from other nodes are
+    /// duplicated too, so the copies receive the same inputs as the originals.
+    /// Returns the new ids, in the order of `ids`.
+    pub fn duplicate(
+        &mut self,
+        ids: &[NodeId],
+        registry: &NodeRegistry,
+        offset: [f32; 2],
+        keep_inputs: bool,
+    ) -> Result<Vec<NodeId>, GraphError> {
+        let doc = self.copy_nodes(ids)?;
+        let map = self.paste(&doc, registry, offset)?;
+        if keep_inputs {
+            let incoming: Vec<Edge> = self
+                .edges
+                .iter()
+                .filter(|e| {
+                    map.iter().any(|(old, _)| *old == e.to.node)
+                        && !map.iter().any(|(old, _)| *old == e.from.node)
+                })
+                .cloned()
+                .collect();
+            for e in incoming {
+                let to = map
+                    .iter()
+                    .find(|(old, _)| *old == e.to.node)
+                    .expect("filtered")
+                    .1;
+                // Cannot fail: same ports as an existing valid edge, and the
+                // copy has no outgoing edges back into the source.
+                self.connect(e.from.node, &e.from.port, to, &e.to.port)?;
+            }
+        }
+        Ok(ids
+            .iter()
+            .filter_map(|id| map.iter().find(|(old, _)| old == id).map(|(_, new)| *new))
+            .collect())
+    }
+
+    /// Asks a node for an auxiliary value from its last evaluation (see
+    /// [`Node::probe`]), e.g. an intermediate image for an editor overlay.
+    pub fn probe(&self, id: NodeId, key: &str) -> Option<Value> {
+        self.node(id)?.probe(key)
+    }
+
     pub fn to_json(&self) -> Result<String, GraphError> {
         Ok(serde_json::to_string_pretty(&self.to_doc()?)?)
     }
