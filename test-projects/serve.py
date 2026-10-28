@@ -2,8 +2,9 @@
 
     python3 test-projects/serve.py [port]
 
-Then open http://localhost:8000/target/web/index.html, or with a project:
-http://localhost:8000/target/web/index.html?open=../../test-projects/pcb-overlay.json
+After `scripts/build.sh web`, open http://localhost:8000/dist/web/, or with
+a project: http://localhost:8000/dist/web/?open=../../test-projects/pcb-overlay.json
+(add `&simd=0` to try the build for older browsers).
 
 `/__delay?ms=N` answers after N ms with a 1-pixel image; a page that shows it
 fires its load event only then (used by web-screenshot.sh).

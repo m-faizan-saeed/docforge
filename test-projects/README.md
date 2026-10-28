@@ -41,16 +41,17 @@ with X11: `env -u WAYLAND_DISPLAY test-projects/screenshots.sh`.
 
 ## Web version
 
-Build the web version (`trunk build --release` in `crates/docforge-app`),
-then:
+Build the web version with `scripts/build.sh web`, then:
 
 ```sh
 python3 test-projects/serve.py        # http://localhost:8000
-# open http://localhost:8000/target/web/index.html?open=../../test-projects/pcb-overlay.json
+# open http://localhost:8000/dist/web/?open=../../test-projects/pcb-overlay.json
+# (add &simd=0 for the build for older browsers)
 
 test-projects/web-screenshot.sh test-projects/out/web-overlay.png test-projects/pcb-overlay.json "select=3"
 ```
 
 `web-screenshot.sh <out.png> [project] [hooks] [wait-ms]` screenshots the page
-in headless Firefox; hooks are page parameters such as `select=1&edit_step=0`.
-The page's console log is saved next to the PNG.
+in headless Firefox. Hooks are page parameters, such as `select=1&edit_step=0`
+or `simd=0`. The page's console log is saved next to the PNG, including which
+build started.

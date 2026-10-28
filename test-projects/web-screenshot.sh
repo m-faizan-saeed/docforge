@@ -5,21 +5,24 @@
 #
 # `project.json` is relative to the repository; `hooks` are extra page
 # parameters, e.g. "select=3&edit_step=1" (like DOCFORGE_SELECT etc. on
-# desktop). Build first: `trunk build --release` in crates/docforge-app.
+# desktop), or "simd=0" to test the build for older browsers.
+# Build first: `scripts/build.sh web` (or set WEB=target/web after a plain
+# `trunk build --release` in crates/docforge-app).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 out=$(realpath -m "$1"); project=${2:-}; hooks=${3:-}; wait=${4:-30000}
 port=8765
+web=${WEB:-dist/web}
 python3 test-projects/serve.py $port & server=$!
 profile=$(mktemp -d)
-trap 'kill $server; rm -rf "$profile" target/web/screenshot.html' EXIT
+trap 'kill $server; rm -rf "$profile" "$web/screenshot.html"' EXIT
 sleep 1
 # A copy of the page that holds its load event back while the app runs; the
 # app shows its own screenshot over the page (`screenshot` hook), which is
 # what Firefox captures (it does not capture WebGL canvases).
 sed "s|</body>|<img src=\"/__delay?ms=$wait\" style=\"display:none\"></body>|" \
-    target/web/index.html > target/web/screenshot.html
-url="http://127.0.0.1:$port/target/web/screenshot.html?screenshot=1"
+    "$web/index.html" > "$web/screenshot.html"
+url="http://127.0.0.1:$port/$web/screenshot.html?screenshot=1"
 [ -n "$project" ] && url="$url&open=../../$project"
 [ -n "$hooks" ] && url="$url&$hooks"
 # Software WebGL for the headless browser; the page's console → <out>.log.

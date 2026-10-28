@@ -37,6 +37,7 @@ as JSON project files that can be re-run from the command line.
 ## Contents
 
 1. [Requirements and building](#requirements-and-building) ·
+   [Building for distribution](#building-for-distribution) ·
    [In a web browser](#in-a-web-browser)
 2. [Quick start](#quick-start)
 3. [The desktop app](#the-desktop-app)
@@ -88,6 +89,29 @@ The app accepts an optional file to open:
 > (`[profile.dev.package."*"] opt-level = 3`), so `cargo run` without
 > `--release` is usable. Release builds are still several times faster.
 
+### Building for distribution
+
+`scripts/build.sh` builds everything into `dist/`:
+
+```sh
+scripts/build.sh              # all: this computer's app, Windows, web
+scripts/build.sh desktop      # the app for this computer → dist/linux-x86_64/ (etc.)
+scripts/build.sh windows      # Windows .exe            → dist/windows-x86_64/
+scripts/build.sh macos        # macOS (on a Mac only)   → dist/macos-aarch64/, dist/macos-x86_64/
+scripts/build.sh web          # browser version         → dist/web/
+scripts/build.sh desktop web  # several at once
+```
+
+| Target | Requirements |
+|---|---|
+| desktop | Rust |
+| windows | On Windows: Rust. On Linux/macOS: the MinGW-w64 toolchain (`x86_64-w64-mingw32-gcc`, e.g. the `mingw-w64-gcc` package), or [`cross`](https://github.com/cross-rs/cross) with Docker or Podman running |
+| macos | A Mac (Apple's SDK can't be used elsewhere) |
+| web | `rustup target add wasm32-unknown-unknown`, `cargo install trunk --locked` |
+
+The desktop app is a single file with no installer; copy it anywhere. On
+Windows it runs without a console window.
+
 ### In a web browser
 
 The same app also runs in a web page (WebAssembly). Every tool works there,
@@ -98,23 +122,34 @@ compiled for the `wasm32` target.
 rustup target add wasm32-unknown-unknown
 cargo install trunk --locked
 
-cd crates/docforge-app
-trunk serve --release          # build and serve on http://127.0.0.1:8080
-trunk build --release          # or only build, into target/web/
+scripts/build.sh web                         # publishable build → dist/web/
+cd crates/docforge-app && trunk serve --release   # or: develop on http://127.0.0.1:8080
 ```
 
-`target/web/` (an `index.html`, a `.js` file and a ~16 MB `.wasm` file, about
-5 MB gzip-compressed) can be put on any static web server. The web build uses
-its own Cargo profile, `web-release` (link-time optimisation, stripped), so
-desktop release builds are untouched. For a smaller `.wasm` file, install
-binaryen (`wasm-opt`) and set `data-wasm-opt="3"` in
-`crates/docforge-app/index.html`.
+**Publishing.** `dist/web/` holds the page and two builds of the app. Put
+the whole folder on any static web server; no special server settings are
+needed.
 
-**Opening a project from the address.** `index.html?open=<url>` loads a
-project. It also loads the files its nodes read (each `path`/`font`
-setting), resolved relative to the project like on desktop. For example,
-serve the repository with `python3 test-projects/serve.py` and open
-<http://localhost:8000/target/web/index.html?open=../../test-projects/pcb-overlay.json>.
+| Folder | For | Size (gzip) |
+|---|---|---|
+| `simd/` | Browsers with WebAssembly SIMD: Chrome/Edge 91+, Firefox 89+, Safari 16.4+ (iOS 16.4+). About 10% faster | ~5.3 MB |
+| `base/` | Older browsers, e.g. Safari 15 on iPhone 6s/7 | ~5.4 MB |
+
+The page checks for SIMD when it loads and downloads only the matching
+build. Add `?simd=0` to the address to try the fallback. Both builds need
+WebGL2 (Chrome 56+, Firefox 51+, Safari 15+).
+
+- **Cargo profile:** the web builds use their own profile, `web-release`
+  (link-time optimisation, stripped), so desktop release builds are untouched.
+- **Smaller files:** install binaryen (`wasm-opt`) and set
+  `data-wasm-opt="3"` in `crates/docforge-app/index.html`.
+- **Development:** `trunk serve` builds a single, non-SIMD build.
+
+**Opening a project from the address.** `?open=<url>` loads a project. It
+also loads the files its nodes read (each `path`/`font` setting), resolved
+relative to the project like on desktop. For example, serve the repository
+with `python3 test-projects/serve.py` and open
+<http://localhost:8000/dist/web/?open=../../test-projects/pcb-overlay.json>.
 
 **What is different in the browser:**
 
@@ -123,7 +158,7 @@ serve the repository with `python3 test-projects/serve.py` and open
 | Files | Read and written on disk by path | Kept in memory for the tab. **Browse…**, **File → Open** and drag-and-drop copy a file in; nodes then find it by path. A project's relative paths also find a file opened from anywhere if the name matches one file |
 | Saving | Files are written; auto-save on every change | **Save now** / **Save PDF now** download the file; no auto-save. **File → Download project** saves the project |
 | Processing | On background threads; the UI never waits | On the page's only thread, between frames: the page pauses while a step runs (it shows "Working…" first). Dragging a slider updates the preview when you pause |
-| Speed | Full speed, multi-core | Roughly 2× slower and single-core (e.g. the Enhance test project: 186 ms vs 392 ms) |
+| Speed | Full speed, multi-core | Single-core, so about 3–4× slower on an 8-core machine (Enhance test project: ~107 ms desktop, ~364 ms SIMD build, ~402 ms fallback). Browsers only allow threads when the server sends special headers (COOP/COEP), which plain static hosting can't |
 | Projects that read files | Load at once | Open their input files again in the tab (or use `?open=`) |
 | A crashing node | Reported; the app keeps running | Stops the page (reload it) |
 
@@ -951,6 +986,7 @@ crates/
                      background evaluator, thumbnails; web entry point,
                      index.html and Trunk.toml for the browser build
 test-projects/       Projects and inputs for trying the app; test scripts
+scripts/build.sh     Builds the desktop, Windows, macOS and web versions into dist/
 ```
 
 - **Data model:** values flow between nodes as `Arc<RasterImage>` (RGBA8 plus
@@ -1012,8 +1048,9 @@ test-projects/screenshots.sh                               # screenshot all → 
 ### Testing the web version
 
 ```sh
-cd crates/docforge-app && trunk build --release && cd ../..
+scripts/build.sh web
 test-projects/web-screenshot.sh test-projects/out/web.png test-projects/pcb-overlay.json "select=3"
+test-projects/web-screenshot.sh test-projects/out/web-old.png test-projects/pcb-overlay.json "select=3&simd=0"
 ```
 
 `web-screenshot.sh` serves the repository (`test-projects/serve.py`), opens

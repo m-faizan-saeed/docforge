@@ -3,6 +3,9 @@
 //!     cargo run --release -p docforge-app [project.json | image]
 //!     trunk serve --release crates/docforge-app/index.html   # in a browser
 
+// No console window next to the app on Windows (release builds).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod app;
 mod background;
 mod bounds;

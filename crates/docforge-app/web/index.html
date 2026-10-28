@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>docforge</title>
+    <!-- The page that `scripts/build.sh web` publishes. It loads one of two
+         builds of the app: simd/ (faster, needs WebAssembly SIMD: Chrome/Edge
+         91+, Firefox 89+, Safari 16.4+) or base/ for older browsers.
+         `?simd=0` forces base/. -->
+    <style>
+        html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1b1b; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #loading {
+            position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+            color: #ccc; font: 16px system-ui, sans-serif; flex-direction: column;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="docforge_canvas"></canvas>
+    <div id="loading">Loading docforge…</div>
+    <script type="module">
+        // A tiny module using one SIMD instruction: valid only where
+        // WebAssembly SIMD is supported (the check from wasm-feature-detect).
+        const SIMD_PROBE = new Uint8Array([
+            0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0,
+            10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11,
+        ]);
+        const forced = new URLSearchParams(location.search).get("simd") === "0";
+        const simd = !forced && WebAssembly.validate(SIMD_PROBE);
+        const dir = simd ? "./simd/" : "./base/";
+        console.log(`docforge: starting the ${simd ? "SIMD" : "baseline"} build`);
+        try {
+            const app = await import(`${dir}docforge.js`);
+            // Instantiating runs the app's `main`, which takes over the canvas.
+            await app.default({ module_or_path: `${dir}docforge_bg.wasm` });
+        } catch (err) {
+            const loading = document.getElementById("loading");
+            if (loading) {
+                loading.textContent = `docforge could not start: ${err}`;
+            }
+            throw err;
+        }
+    </script>
+</body>
+</html>

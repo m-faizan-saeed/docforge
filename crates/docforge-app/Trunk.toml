@@ -1,6 +1,9 @@
-# Web build: `trunk build --release` (or `trunk serve --release`) in this folder.
+# Web build: `trunk serve --release` here for development. For publishing,
+# use `scripts/build.sh web` (a SIMD build plus a fallback for older browsers).
 [build]
 target = "index.html"
 dist = "../../target/web"
 # Relative asset links, so the page works from any folder of a web server.
 public_url = "./"
+# Stable file names (docforge.js, docforge_bg.wasm) for web/index.html.
+filehash = false
