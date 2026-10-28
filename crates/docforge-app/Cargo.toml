@@ -14,6 +14,9 @@ path = "src/main.rs"
 docforge-core.workspace = true
 docforge-nodes.workspace = true
 eframe = "0.37"
+# Bundled fonts for symbols (⏶ 🗑 💾 …), so they look the same everywhere and
+# don't depend on the system's fonts (see src/fonts.rs).
+egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
 hayro.workspace = true
 serde_json.workspace = true
 # std::time::Instant on desktop; the browser's clock on the web.
@@ -23,9 +26,6 @@ web-time = "1"
 rfd = "0.17"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# Desktop takes symbols (⏶ 🗑 💾 …) from system fonts; a web page has none,
-# so it bundles egui's emoji fonts instead.
-egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

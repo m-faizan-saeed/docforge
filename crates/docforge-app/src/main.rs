@@ -11,6 +11,7 @@ mod background;
 mod bounds;
 mod canvas;
 mod dialogs;
+mod fonts;
 mod handles;
 mod inspector;
 mod pdf_view;

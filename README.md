@@ -1072,6 +1072,8 @@ DOCFORGE_SCREENSHOT=shot.png DOCFORGE_SELECT=1 ./target/release/docforge project
 - `DOCFORGE_SELECT`: select the node with this id first, so its panel and
   preview are shown. A comma-separated list selects several nodes.
 - `DOCFORGE_DUPLICATE=1`: duplicate the selection at start-up, as Ctrl+D does.
+- `DOCFORGE_THEME=light|dark`: force a theme (the app normally follows the
+  system's).
 - `DOCFORGE_EDIT_STEP=N`: open preview editing for step *N* (0-based) of the
   selected Enhance Image node, or for layer *N* of a selected PDF Overlay
   (any value opens a PDF Edit crop).

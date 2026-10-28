@@ -131,7 +131,7 @@ impl Viewport {
         self.toolbar(ui, image, facts);
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
+        painter.rect_filled(rect, 0.0, backdrop(ui.visuals()));
 
         if self.fit || response.double_clicked() {
             self.zoom = fit_zoom(rect.size(), img_size);
@@ -161,6 +161,17 @@ impl Viewport {
             self.pan = Vec2::ZERO;
             image_rect = Rect::from_center_size(rect.center(), image_rect.size());
         }
+        // Set the page off the backdrop, whatever its colour (a white page in
+        // the light theme would otherwise vanish).
+        painter.add(
+            egui::epaint::Shadow {
+                offset: [0, 2],
+                blur: 10,
+                spread: 0,
+                color: Color32::from_black_alpha(90),
+            }
+            .as_shape(image_rect, 0.0),
+        );
         let checker = self.checker(ui.ctx());
         let tiles = image_rect.size() / 16.0;
         painter.image(
@@ -177,6 +188,13 @@ impl Viewport {
                 Color32::WHITE,
             );
         }
+
+        painter.rect_stroke(
+            image_rect,
+            0.0,
+            egui::Stroke::new(1.0, Color32::from_black_alpha(70)),
+            egui::StrokeKind::Outside,
+        );
 
         if let Some(overlay) = overlay {
             overlay(
@@ -269,6 +287,16 @@ impl Viewport {
                 )
             })
             .clone()
+    }
+}
+
+/// Behind the image: dark in the dark theme; mid-gray in the light theme, as
+/// in document viewers, so white pages stand out.
+fn backdrop(visuals: &egui::Visuals) -> Color32 {
+    if visuals.dark_mode {
+        visuals.extreme_bg_color
+    } else {
+        Color32::from_gray(176)
     }
 }
 

@@ -1303,7 +1303,7 @@ fn enhance_image(ui: &mut Ui, node: &mut EnhanceImage, edit_step: &mut Option<us
                         if ui.small_button("🗑").on_hover_text("Remove").clicked() {
                             action = Some(StepAction::Remove(i));
                         }
-                        if ui.small_button("⧉").on_hover_text("Duplicate").clicked() {
+                        if ui.small_button("🗐").on_hover_text("Duplicate").clicked() {
                             action = Some(StepAction::Duplicate(i));
                         }
                         if ui

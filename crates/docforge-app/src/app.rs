@@ -123,6 +123,13 @@ enum Pending {
 
 impl DocforgeApp {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>) -> Self {
+        crate::fonts::install(&cc.egui_ctx);
+        // Test hook: force a theme (the app normally follows the system's).
+        match test_hook("theme").as_deref() {
+            Some("light") => cc.egui_ctx.set_theme(egui::ThemePreference::Light),
+            Some("dark") => cc.egui_ctx.set_theme(egui::ThemePreference::Dark),
+            _ => {}
+        }
         let registry = docforge_nodes::registry();
         let ctx = cc.egui_ctx.clone();
         let evaluator = Evaluator::spawn(registry.clone(), move || ctx.request_repaint());
@@ -1050,7 +1057,7 @@ impl DocforgeApp {
             );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if ui.button("⧉ Duplicate").on_hover_text("Ctrl+D").clicked() {
+                if ui.button("🗐 Duplicate").on_hover_text("Ctrl+D").clicked() {
                     self.duplicate_selection();
                 }
                 if ui.button("Copy").on_hover_text("Ctrl+C").clicked() {
