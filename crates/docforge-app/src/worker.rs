@@ -14,14 +14,17 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use docforge_core::{
     EvalContext, Graph, GraphDoc, NodeError, NodeId, NodeRegistry, NodeStatus, Value,
 };
 use docforge_nodes::{OutputImage, PrintLayout};
+
+use crate::background::Background;
 
 pub struct Job {
     pub rev: u64,
@@ -54,33 +57,35 @@ pub struct EvalResult {
 }
 
 pub struct Evaluator {
-    jobs: mpsc::Sender<Job>,
+    jobs: Background<Job>,
     results: mpsc::Receiver<EvalResult>,
     cancel: Arc<AtomicBool>,
     busy: Arc<AtomicBool>,
 }
 
 impl Evaluator {
-    /// Starts the worker thread. `wake_ui` is called whenever a result is
-    /// ready (pass something that requests a repaint).
-    pub fn spawn(registry: NodeRegistry, wake_ui: impl Fn() + Send + 'static) -> Self {
-        let (job_tx, job_rx) = mpsc::channel();
+    /// Starts the worker (a thread on desktop). `wake_ui` is called whenever
+    /// a result is ready (pass something that requests a repaint).
+    pub fn spawn(registry: NodeRegistry, wake_ui: impl Fn() + Send + Sync + 'static) -> Self {
         let (result_tx, result_rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let busy = Arc::new(AtomicBool::new(false));
         let worker = Worker {
             registry,
-            jobs: job_rx,
             results: result_tx,
             cancel: Arc::clone(&cancel),
             busy: Arc::clone(&busy),
         };
-        thread::Builder::new()
-            .name("docforge-eval".into())
-            .spawn(move || worker.run(wake_ui))
-            .expect("failed to start the evaluation thread");
+        let wake_ui = Arc::new(wake_ui);
+        let wake = Arc::clone(&wake_ui);
+        let mut graph = Graph::new();
+        let jobs = Background::spawn(
+            "docforge-eval",
+            move || wake(),
+            move |job| worker.handle(&mut graph, job, &*wake_ui),
+        );
         Self {
-            jobs: job_tx,
+            jobs,
             results: result_rx,
             cancel,
             busy,
@@ -91,13 +96,13 @@ impl Evaluator {
     pub fn submit(&self, job: Job) {
         self.cancel.store(true, Ordering::SeqCst);
         self.busy.store(true, Ordering::SeqCst);
-        // The worker only stops when the app exits, so a send failure can
-        // only happen during shutdown.
-        let _ = self.jobs.send(job);
+        self.jobs.send(job);
     }
 
-    /// The newest finished result, if any arrived since the last call.
+    /// The newest finished result, if any arrived since the last call. On
+    /// the web this is where the evaluation itself runs.
     pub fn poll(&self) -> Option<EvalResult> {
+        self.jobs.poll();
         self.results.try_iter().last()
     }
 
@@ -108,29 +113,21 @@ impl Evaluator {
 
 struct Worker {
     registry: NodeRegistry,
-    jobs: mpsc::Receiver<Job>,
     results: mpsc::Sender<EvalResult>,
     cancel: Arc<AtomicBool>,
     busy: Arc<AtomicBool>,
 }
 
 impl Worker {
-    fn run(self, wake_ui: impl Fn()) {
-        let mut graph = Graph::new();
-        while let Ok(mut job) = self.jobs.recv() {
-            // Skip straight to the newest snapshot.
-            while let Ok(newer) = self.jobs.try_recv() {
-                job = newer;
-            }
-            self.cancel.store(false, Ordering::SeqCst);
-            let result = self.evaluate(&mut graph, job);
-            if self.jobs_pending() {
-                continue; // a newer job is waiting; its result supersedes this one
-            }
-            self.busy.store(false, Ordering::SeqCst);
-            if self.results.send(result).is_err() {
-                return;
-            }
+    /// Evaluates the newest snapshot (older queued ones are skipped).
+    fn handle(&self, graph: &mut Graph, job: Job, wake_ui: &dyn Fn()) {
+        self.cancel.store(false, Ordering::SeqCst);
+        let result = self.evaluate(graph, job);
+        if self.jobs_pending() {
+            return; // a newer job is waiting; its result supersedes this one
+        }
+        self.busy.store(false, Ordering::SeqCst);
+        if self.results.send(result).is_ok() {
             wake_ui();
         }
     }

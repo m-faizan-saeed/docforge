@@ -2,8 +2,10 @@ use std::{
     collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
+    time::Duration,
 };
+
+use web_time::Instant;
 
 use docforge_core::{
     EvalContext, Graph, NodeId, NodeMeta, NodeRegistry, NodeType, PdfDocument, PortRef,
@@ -22,7 +24,7 @@ use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText, Vi
 use crate::{
     bounds,
     canvas::{self, CanvasEvent, CanvasState, Status},
-    handles, inspector,
+    dialogs, handles, inspector,
     pdf_view::PdfView,
     thumbs::Thumbnails,
     viewport::Viewport,
@@ -40,12 +42,20 @@ const SHORTCUT_SAVE_AS: KeyboardShortcut =
 const SHORTCUT_DUPLICATE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::D);
 const SHORTCUT_SELECT_ALL: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::A);
 
+/// Dialog ids for the File menu (see [`dialogs::picked`]).
+const OPEN_PROJECT: &str = "open_project";
+const OPEN_IMAGE: &str = "open_image";
+/// The project named in a web page's address (`?open=`).
+#[cfg(target_arch = "wasm32")]
+const OPEN_URL: &str = "open_url";
+
 /// Marks clipboard text produced by docforge (see [`DocforgeApp::copy_selection`]).
 const CLIPBOARD_TAG: &str = "docforge-nodes";
 /// Where duplicates appear relative to their originals, in canvas units.
 const DUPLICATE_OFFSET: [f32; 2] = [40.0, 40.0];
 
 pub struct DocforgeApp {
+    ctx: egui::Context,
     registry: NodeRegistry,
     /// The document. Never evaluated here; the worker evaluates snapshots.
     graph: Graph,
@@ -84,6 +94,9 @@ pub struct DocforgeApp {
     confirm: Option<Pending>,
     title: String,
     smoke_test: Option<SmokeTest>,
+    /// Web: a project named in the page address is being downloaded.
+    #[cfg(target_arch = "wasm32")]
+    opening_url: bool,
 }
 
 /// `DOCFORGE_SCREENSHOT=out.png`: once evaluation settles, save a screenshot
@@ -114,6 +127,7 @@ impl DocforgeApp {
         let ctx = cc.egui_ctx.clone();
         let evaluator = Evaluator::spawn(registry.clone(), move || ctx.request_repaint());
         let mut app = Self {
+            ctx: cc.egui_ctx.clone(),
             registry,
             graph: Graph::new(),
             project: None,
@@ -139,7 +153,9 @@ impl DocforgeApp {
             message: None,
             confirm: None,
             title: String::new(),
-            smoke_test: std::env::var_os("DOCFORGE_SCREENSHOT").map(|path| SmokeTest {
+            #[cfg(target_arch = "wasm32")]
+            opening_url: false,
+            smoke_test: test_hook("screenshot").map(|path| SmokeTest {
                 path: path.into(),
                 frames: 0,
                 requested: false,
@@ -152,8 +168,30 @@ impl DocforgeApp {
             Some(path) => app.open_image(path),
             None => {}
         }
-        // Test hooks (see the README's "Automated GUI screenshots").
-        if let Ok(list) = std::env::var("DOCFORGE_SELECT") {
+        // A web page can open a project from its address: `?open=<url>`. The
+        // test hooks then wait for it.
+        #[cfg(target_arch = "wasm32")]
+        if let Some(url) = crate::web::parameter("open") {
+            let ctx = cc.egui_ctx.clone();
+            app.info(format!("Opening {url}…"));
+            app.opening_url = true;
+            crate::web::open_url(url, move |result| {
+                match result {
+                    Ok(path) => dialogs::deliver(egui::Id::unique(OPEN_URL), path),
+                    Err(err) => crate::web::report(format!("Could not open {err}")),
+                }
+                ctx.request_repaint();
+            });
+            return app;
+        }
+        app.apply_test_hooks();
+        app
+    }
+
+    /// Test hooks (see the README's "Automated GUI screenshots").
+    fn apply_test_hooks(&mut self) {
+        let app = self;
+        if let Some(list) = test_hook("select") {
             let ids: Vec<NodeId> = list
                 .split(',')
                 .filter_map(|v| v.trim().parse().ok())
@@ -162,18 +200,15 @@ impl DocforgeApp {
             app.select(ids.first().copied());
             app.selection.extend(ids);
         }
-        if std::env::var_os("DOCFORGE_DUPLICATE").is_some() {
+        if test_hook("duplicate").is_some() {
             app.duplicate_selection();
         }
         if let (Some(id), Some(step)) = (
             app.selected,
-            std::env::var("DOCFORGE_EDIT_STEP")
-                .ok()
-                .and_then(|v| v.parse().ok()),
+            test_hook("edit_step").and_then(|v| v.parse().ok()),
         ) {
             app.edit_step = Some((id, step));
         }
-        app
     }
 
     /// Selects only `id` (or nothing).
@@ -201,13 +236,17 @@ impl DocforgeApp {
             || self.pdf_view.is_rendering()
             || self.thumbs.is_busy()
             || self.edit_image_pending();
+        #[cfg(target_arch = "wasm32")]
+        let busy = busy || self.opening_url;
         let Some(test) = &mut self.smoke_test else {
             return;
         };
         test.frames += 1;
         if test.done.load(Ordering::SeqCst) {
             self.modified = false;
-            ctx.send_viewport_cmd(ViewportCommand::Close);
+            if cfg!(not(target_arch = "wasm32")) {
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
             return;
         }
         let settled = test.frames > 30 && !busy && self.results.is_some();
@@ -215,6 +254,17 @@ impl DocforgeApp {
             test.requested = true;
             let (path, done, repaint) = (test.path.clone(), Arc::clone(&test.done), ctx.clone());
             ctx.request_screenshot(move |image| {
+                // A web page can't write the file: it shows the picture
+                // instead, for the browser's own screenshot to capture.
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = &path;
+                    crate::web::show_screenshot(&image);
+                    done.store(true, Ordering::SeqCst);
+                    repaint.request_repaint();
+                    return;
+                }
+                #[allow(unreachable_code)]
                 let rgba = image.pixels.iter().flat_map(|c| c.to_array()).collect();
                 let result =
                     RasterImage::from_rgba8(image.size[0] as u32, image.size[1] as u32, rgba)
@@ -284,7 +334,15 @@ impl DocforgeApp {
     }
 
     fn open_project(&mut self, path: &Path) {
-        match Graph::load(path, &self.registry) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let loaded = Graph::load(path, &self.registry);
+        // No file system: the project was put in the in-memory store.
+        #[cfg(target_arch = "wasm32")]
+        let loaded = docforge_core::files::read(path)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| String::from_utf8(bytes).map_err(|e| e.to_string()))
+            .and_then(|json| Graph::from_json(&json, &self.registry).map_err(|e| e.to_string()));
+        match loaded {
             Ok(graph) => {
                 self.replace_document(graph, Some(path.to_owned()));
                 let last = self.graph.nodes().map(|(id, _)| id).last();
@@ -295,15 +353,32 @@ impl DocforgeApp {
         }
     }
 
+    /// A web page cannot write files: it downloads the project instead.
+    #[cfg(target_arch = "wasm32")]
+    fn save_project(&mut self, _save_as: bool) {
+        let name = self
+            .project
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or("project.json".to_owned(), |n| {
+                n.to_string_lossy().into_owned()
+            });
+        match self.graph.to_json() {
+            Ok(json) => {
+                crate::web::download(&name, json.as_bytes());
+                self.info(format!("Downloaded {name}"));
+                self.modified = false;
+            }
+            Err(err) => self.error(format!("Could not save: {err}")),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn save_project(&mut self, save_as: bool) {
         let path = match (&self.project, save_as) {
             (Some(path), false) => path.clone(),
             _ => {
-                let Some(path) = rfd::FileDialog::new()
-                    .add_filter("docforge project", &["json"])
-                    .set_file_name("project.json")
-                    .save_file()
-                else {
+                let Some(path) = dialogs::save(&[dialogs::PROJECT], None, "project.json") else {
                     return;
                 };
                 path
@@ -335,12 +410,13 @@ impl DocforgeApp {
             Pending::New => self.new_document(),
             Pending::Open(Some(path)) => self.open_project(&path),
             Pending::Open(None) => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("docforge project", &["json"])
-                    .pick_file()
-                {
-                    self.open_project(&path);
-                }
+                // Opens when the file arrives (see `picked_files`).
+                dialogs::pick(
+                    &self.ctx,
+                    egui::Id::unique(OPEN_PROJECT),
+                    &[dialogs::PROJECT],
+                    self.project.as_deref(),
+                );
             }
             Pending::Quit => {
                 self.modified = false;
@@ -546,7 +622,31 @@ impl DocforgeApp {
 
     // ----- input handling ----------------------------------------------------
 
+    /// Files chosen in the File menu's dialogs (on the web they arrive
+    /// some frames after the dialog closes).
+    fn picked_files(&mut self) {
+        if let Some(path) = dialogs::picked(egui::Id::unique(OPEN_PROJECT)) {
+            self.open_project(&path);
+        }
+        if let Some(path) = dialogs::picked(egui::Id::unique(OPEN_IMAGE)) {
+            self.open_image(path);
+        }
+        #[cfg(target_arch = "wasm32")]
+        if let Some(path) = dialogs::picked(egui::Id::unique(OPEN_URL)) {
+            self.open_project(&path);
+            self.opening_url = false;
+            self.apply_test_hooks();
+        }
+        #[cfg(target_arch = "wasm32")]
+        for message in crate::web::reports() {
+            self.error(message);
+            self.opening_url = false;
+        }
+    }
+
     fn handle_global_input(&mut self, ctx: &egui::Context) {
+        self.picked_files();
+        #[cfg(not(target_arch = "wasm32"))]
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
                 .dropped_files
@@ -554,6 +654,16 @@ impl DocforgeApp {
                 .map(|f| f.path().to_path_buf())
                 .collect()
         });
+        // Dropped files are read asynchronously and arrive some frames later.
+        #[cfg(target_arch = "wasm32")]
+        let dropped: Vec<PathBuf> = {
+            ctx.input(|i| {
+                for file in &i.raw.dropped_files {
+                    crate::web::read_dropped(std::sync::Arc::clone(file), ctx.clone());
+                }
+            });
+            crate::web::dropped()
+        };
         for path in dropped {
             if is_project(&path) {
                 self.guarded(Pending::Open(Some(path)));
@@ -811,23 +921,24 @@ impl DocforgeApp {
                 if ui.add(egui::Button::new("Open project…").shortcut_text(ui.ctx().format_shortcut(&SHORTCUT_OPEN))).clicked() {
                     self.guarded(Pending::Open(None));
                 }
-                if ui.button("Open image…").clicked()
-                    && let Some(path) = rfd::FileDialog::new()
-                        .add_filter("Images", &["png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp", "gif"])
-                        .pick_file()
-                {
-                    self.open_image(path);
+                if ui.button("Open image…").clicked() {
+                    dialogs::pick(ui.ctx(), egui::Id::unique(OPEN_IMAGE), &[dialogs::IMAGES], None);
                 }
                 ui.separator();
-                if ui.add(egui::Button::new("Save project").shortcut_text(ui.ctx().format_shortcut(&SHORTCUT_SAVE))).clicked() {
+                // A web page downloads the project instead of saving it.
+                let save = if cfg!(target_arch = "wasm32") { "Download project" } else { "Save project" };
+                if ui.add(egui::Button::new(save).shortcut_text(ui.ctx().format_shortcut(&SHORTCUT_SAVE))).clicked() {
                     self.save_project(false);
                 }
-                if ui.add(egui::Button::new("Save project as…").shortcut_text(ui.ctx().format_shortcut(&SHORTCUT_SAVE_AS))).clicked() {
-                    self.save_project(true);
-                }
-                ui.separator();
-                if ui.button("Quit").clicked() {
-                    ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if ui.add(egui::Button::new("Save project as…").shortcut_text(ui.ctx().format_shortcut(&SHORTCUT_SAVE_AS))).clicked() {
+                        self.save_project(true);
+                    }
+                    ui.separator();
+                    if ui.button("Quit").clicked() {
+                        ui.ctx().send_viewport_cmd(ViewportCommand::Close);
+                    }
                 }
             });
             ui.menu_button("Edit", |ui| {
@@ -1002,7 +1113,10 @@ impl DocforgeApp {
                 }
             }
         }
-        if let Some(path) = self.results.as_ref().and_then(|r| r.written.get(&id)) {
+        // (A web page only writes to memory; its files arrive as downloads.)
+        if cfg!(not(target_arch = "wasm32"))
+            && let Some(path) = self.results.as_ref().and_then(|r| r.written.get(&id))
+        {
             ui.label(RichText::new(format!("Last saved: {}", path.display())).weak());
         }
         if kind == OutputImage::KIND {
@@ -1056,10 +1170,25 @@ impl DocforgeApp {
                 ctx = ctx.with_base_dir(dir);
             }
             match node.save(&image, &ctx) {
-                Ok(path) => self.info(format!("Saved {}", path.display())),
+                Ok(path) => self.saved(&path),
                 Err(err) => self.error(format!("Save failed: {err}")),
             }
         }
+    }
+
+    /// Reports a file a "Save now" button wrote. A web page wrote it to
+    /// memory, so it is handed to the browser as a download.
+    fn saved(&mut self, path: &Path) {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(bytes) = docforge_core::files::get(path) {
+            let name = path
+                .file_name()
+                .map_or("download".into(), |n| n.to_string_lossy());
+            crate::web::download(&name, &bytes);
+            self.info(format!("Downloaded {name}"));
+            return;
+        }
+        self.info(format!("Saved {}", path.display()));
     }
 
     fn save_pdf_now_button(&mut self, ui: &mut egui::Ui, id: NodeId) {
@@ -1075,7 +1204,7 @@ impl DocforgeApp {
                 ctx = ctx.with_base_dir(dir);
             }
             match node.save(&doc, &ctx) {
-                Ok(path) => self.info(format!("Saved {}", path.display())),
+                Ok(path) => self.saved(&path),
                 Err(err) => self.error(format!("Save failed: {err}")),
             }
         }
@@ -1468,7 +1597,11 @@ impl DocforgeApp {
             .map_or("Untitled".to_owned(), |n| n.to_string_lossy().into_owned());
         let title = format!("{}{name} — docforge", if self.modified { "● " } else { "" });
         if title != self.title {
+            #[cfg(not(target_arch = "wasm32"))]
             ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));
+            #[cfg(target_arch = "wasm32")]
+            crate::web::set_title(&title);
+            let _ = ctx;
             self.title = title;
         }
     }
@@ -1522,6 +1655,15 @@ impl eframe::App for DocforgeApp {
         // Keep polling input files for outside changes.
         ctx.request_repaint_after(FILE_POLL);
     }
+}
+
+/// A test hook's value: `DOCFORGE_<NAME>` in the environment on desktop,
+/// `?<name>=` in a web page's address.
+fn test_hook(name: &str) -> Option<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    return std::env::var(format!("DOCFORGE_{}", name.to_uppercase())).ok();
+    #[cfg(target_arch = "wasm32")]
+    return crate::web::parameter(name);
 }
 
 fn is_project(path: &Path) -> bool {

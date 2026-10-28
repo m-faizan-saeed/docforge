@@ -22,3 +22,8 @@ serde_json.workspace = true
 lopdf.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+
+# lopdf draws random numbers (for encryption); in a web page they come from
+# the browser's crypto API.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }

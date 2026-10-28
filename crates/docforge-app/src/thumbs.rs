@@ -10,6 +10,8 @@ use docforge_core::{PdfDocument, RasterImage};
 use docforge_nodes::pdf_input::images;
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 
+use crate::background::Background;
+
 /// Longest side of a thumbnail, in pixels.
 const THUMB_SIDE: u32 = 192;
 /// Documents whose thumbnails are kept.
@@ -24,7 +26,7 @@ pub struct Thumb {
 type Batch = (usize, Vec<(String, Result<RasterImage, String>)>);
 
 pub struct Thumbnails {
-    requests: mpsc::Sender<Arc<PdfDocument>>,
+    requests: Background<Arc<PdfDocument>>,
     results: mpsc::Receiver<Batch>,
     ready: HashMap<usize, Vec<Thumb>>,
     pending: Option<usize>,
@@ -35,31 +37,26 @@ pub struct Thumbnails {
 
 impl Thumbnails {
     pub fn new(ctx: egui::Context) -> Self {
-        let (req_tx, req_rx) = mpsc::channel::<Arc<PdfDocument>>();
         let (res_tx, res_rx) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("docforge-thumbnails".into())
-            .spawn(move || {
-                while let Ok(mut doc) = req_rx.recv() {
-                    while let Ok(newer) = req_rx.try_recv() {
-                        doc = newer;
-                    }
-                    let keys: Vec<String> = images::list(&doc).into_iter().map(|e| e.key).collect();
-                    let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
-                    let thumbs = images::extract(&doc, &refs, Some(THUMB_SIDE));
-                    let batch = (
-                        Arc::as_ptr(&doc) as usize,
-                        keys.into_iter().zip(thumbs).collect(),
-                    );
-                    if res_tx.send(batch).is_err() {
-                        return;
-                    }
+        let wake = ctx.clone();
+        let requests = Background::spawn(
+            "docforge-thumbnails",
+            move || wake.request_repaint(),
+            move |doc: Arc<PdfDocument>| {
+                let keys: Vec<String> = images::list(&doc).into_iter().map(|e| e.key).collect();
+                let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+                let thumbs = images::extract(&doc, &refs, Some(THUMB_SIDE));
+                let batch = (
+                    Arc::as_ptr(&doc) as usize,
+                    keys.into_iter().zip(thumbs).collect(),
+                );
+                if res_tx.send(batch).is_ok() {
                     ctx.request_repaint();
                 }
-            })
-            .expect("failed to start the thumbnail thread");
+            },
+        );
         Self {
-            requests: req_tx,
+            requests,
             results: res_rx,
             ready: HashMap::new(),
             pending: None,
@@ -74,6 +71,7 @@ impl Thumbnails {
 
     /// Thumbnails for `doc`, or `None` while they are being made.
     pub fn get(&mut self, ctx: &egui::Context, doc: &Arc<PdfDocument>) -> Option<&[Thumb]> {
+        self.requests.poll();
         for (id, batch) in self.results.try_iter().collect::<Vec<_>>() {
             // Only for documents still held: a dropped one's address may
             // already belong to a different document.
@@ -123,7 +121,7 @@ impl Thumbnails {
                 self.docs.remove(&stale);
             }
             self.docs.insert(id, Arc::clone(doc));
-            let _ = self.requests.send(Arc::clone(doc));
+            self.requests.send(Arc::clone(doc));
             self.pending = Some(id);
         }
         self.ready.get(&id).map(Vec::as_slice)

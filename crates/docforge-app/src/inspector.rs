@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
 
-use crate::thumbs::{Thumb, Thumbnails};
+use crate::{
+    dialogs,
+    thumbs::{Thumb, Thumbnails},
+};
 use docforge_core::{Graph, NodeId, NodeRegistry, NodeType as _, PdfDocument};
 use docforge_nodes::{
     Effect, EnhanceImage, IfExists, InputImage, OutputImage, PdfEdit, PdfInput, PdfOverlay,
@@ -22,8 +25,6 @@ use docforge_nodes::{
     print::{self, CutMarks, ItemSize, PageOrientation, Paper, PrintItem},
 };
 use eframe::egui::{self, Color32, DragValue, Grid, RichText, Slider, TextEdit, Ui};
-
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "tif", "tiff", "bmp", "gif"];
 
 /// Edits the node's parameters. Returns whether anything changed.
 /// What some editors need beyond the node itself.
@@ -133,13 +134,12 @@ fn input_image(ui: &mut Ui, node: &mut InputImage, salt: u64) -> bool {
     ui.label("Image file");
     ui.horizontal(|ui| {
         changed |= path_field(ui, ("input_path", salt), &mut node.path, "Choose an image…");
-        if ui.button("Browse…").clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("Images", IMAGE_EXTENSIONS)
-                .add_filter("All files", &["*"])
-                .set_directory(start_dir(&node.path))
-                .pick_file()
-        {
+        if let Some(path) = browse(
+            ui,
+            ("input_browse", salt),
+            &[dialogs::IMAGES, ("All files", &["*"])],
+            &node.path,
+        ) {
             node.path = path;
             changed = true;
         }
@@ -162,20 +162,18 @@ fn output_image(ui: &mut Ui, node: &mut OutputImage, salt: u64) -> bool {
     ui.label("Save to");
     ui.horizontal(|ui| {
         changed |= path_field(ui, ("output_path", salt), &mut node.path, "Choose a file…");
-        if ui.button("Browse…").clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("PNG", &["png"])
-                .add_filter("JPEG", &["jpg", "jpeg"])
-                .add_filter("WebP", &["webp"])
-                .add_filter("TIFF", &["tif", "tiff"])
-                .add_filter("BMP", &["bmp"])
-                .set_directory(start_dir(&node.path))
-                .set_file_name("output.png")
-                .save_file()
-        {
-            node.path = path;
-            changed = true;
-        }
+        changed |= browse_save(
+            ui,
+            &mut node.path,
+            &[
+                ("PNG", &["png"]),
+                ("JPEG", &["jpg", "jpeg"]),
+                ("WebP", &["webp"]),
+                ("TIFF", &["tif", "tiff"]),
+                ("BMP", &["bmp"]),
+            ],
+            "output.png",
+        );
     });
     ui.add_space(4.0);
 
@@ -246,13 +244,16 @@ fn output_image(ui: &mut Ui, node: &mut OutputImage, salt: u64) -> bool {
             ui.end_row();
         });
     changed |= optional_dpi(ui, &mut node.dpi, "Override DPI written to file");
-    changed |= ui
-        .checkbox(&mut node.create_dirs, "Create missing folders")
-        .changed();
-    changed |= ui
-        .checkbox(&mut node.auto_save, "Save automatically on every change")
-        .on_hover_text("When off, the image only passes through; use “Save now”.")
-        .changed();
+    if cfg!(not(target_arch = "wasm32")) {
+        changed |= ui
+            .checkbox(&mut node.create_dirs, "Create missing folders")
+            .changed();
+    }
+    changed |= auto_save(
+        ui,
+        &mut node.auto_save,
+        "When off, the image only passes through; use “Save now”.",
+    );
     if let Some(format) = effective
         && !format.stores_dpi()
     {
@@ -292,12 +293,7 @@ fn pdf_input(ui: &mut Ui, node: &mut PdfInput, salt: u64, extras: Extras<'_>) ->
             &mut node.path,
             "Choose a PDF…",
         );
-        if ui.button("Browse…").clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("PDF", &["pdf"])
-                .set_directory(start_dir(&node.path))
-                .pick_file()
-        {
+        if let Some(path) = browse(ui, ("pdf_input_browse", salt), &[dialogs::PDF], &node.path) {
             node.path = path;
             changed = true;
         }
@@ -1057,20 +1053,13 @@ fn print_layout(
             &mut node.path,
             "Choose a .pdf file…",
         );
-        if ui.button("Browse…").clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("PDF", &["pdf"])
-                .set_directory(start_dir(&node.path))
-                .set_file_name("print.pdf")
-                .save_file()
-        {
-            node.path = path;
-            changed = true;
-        }
+        changed |= browse_save(ui, &mut node.path, &[dialogs::PDF], "print.pdf");
     });
-    changed |= ui
-        .checkbox(&mut node.auto_save, "Save automatically on every change")
-        .changed();
+    changed |= auto_save(
+        ui,
+        &mut node.auto_save,
+        "When off, use “Save PDF now” above.",
+    );
     changed
 }
 
@@ -1544,11 +1533,12 @@ fn font_picker(ui: &mut Ui, font: &mut Option<PathBuf>) -> bool {
             .and_then(|p| p.file_name())
             .map_or("Built-in".to_owned(), |n| n.to_string_lossy().into_owned());
         ui.label(name);
-        if ui.small_button("Choose…").clicked()
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("Fonts", &["ttf", "otf"])
-                .pick_file()
-        {
+        // Unique to this watermark step's card.
+        let id = ui.make_persistent_id("font_picker");
+        if ui.small_button("Choose…").clicked() {
+            dialogs::pick(ui.ctx(), id, &[dialogs::FONTS], font.as_deref());
+        }
+        if let Some(path) = dialogs::picked(id) {
             *font = Some(path);
             changed = true;
         }
@@ -1615,13 +1605,50 @@ fn optional_dpi(ui: &mut Ui, dpi: &mut Option<f32>, label: &str) -> bool {
     changed
 }
 
-fn start_dir(current: &Path) -> PathBuf {
-    current
-        .parent()
-        .filter(|p| p.is_dir())
-        .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_default()
+/// A "Browse…" button for a file to open. Returns the chosen path, which on
+/// the web arrives a few frames after the click.
+fn browse(
+    ui: &mut Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    filters: &[dialogs::Filter],
+    current: &Path,
+) -> Option<PathBuf> {
+    let id = egui::Id::unique(salt);
+    if ui.button("Browse…").clicked() {
+        dialogs::pick(ui.ctx(), id, filters, Some(current));
+    }
+    dialogs::picked(id)
+}
+
+/// A "Browse…" button choosing where to save. A web page has no folders to
+/// choose from (files are downloaded), so there is no button there.
+fn browse_save(ui: &mut Ui, path: &mut PathBuf, filters: &[dialogs::Filter], name: &str) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    if ui.button("Browse…").clicked()
+        && let Some(chosen) = dialogs::save(filters, Some(path), name)
+    {
+        *path = chosen;
+        return true;
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = (ui, path, filters, name);
+    false
+}
+
+/// The "save automatically" checkbox. A web page can't write files in the
+/// background, so there it explains how to download instead.
+fn auto_save(ui: &mut Ui, on: &mut bool, hint: &str) -> bool {
+    if cfg!(target_arch = "wasm32") {
+        ui.label(
+            RichText::new("In the browser, “Save now” downloads the file.")
+                .weak()
+                .small(),
+        );
+        return false;
+    }
+    ui.checkbox(on, "Save automatically on every change")
+        .on_hover_text(hint)
+        .changed()
 }
 
 /// Fallback editor for node kinds without a dedicated one: their saved

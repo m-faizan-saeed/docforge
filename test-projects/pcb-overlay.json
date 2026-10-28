@@ -1,6 +1,6 @@
 {"version": 1,
  "nodes": [
-  {"id": 0, "kind": "pdf_input", "params": {"path": "../reference-code/Simple SMPS.pdf"}, "meta": {"position": [0, 120], "label": "Simple SMPS"}},
+  {"id": 0, "kind": "pdf_input", "params": {"path": "inputs/simple-smps.pdf"}, "meta": {"position": [0, 120], "label": "Simple SMPS"}},
   {"id": 1, "kind": "pdf_edit", "meta": {"position": [240, 20], "label": "Bottom (gray)"}, "params": {
      "crop": "content", "recolor": {"mode": "single", "color": [160, 160, 160], "keep_white": true}}},
   {"id": 2, "kind": "pdf_edit", "meta": {"position": [240, 220], "label": "Top (red to black)"}, "params": {

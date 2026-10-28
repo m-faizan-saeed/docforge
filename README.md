@@ -36,7 +36,8 @@ as JSON project files that can be re-run from the command line.
 
 ## Contents
 
-1. [Requirements and building](#requirements-and-building)
+1. [Requirements and building](#requirements-and-building) ·
+   [In a web browser](#in-a-web-browser)
 2. [Quick start](#quick-start)
 3. [The desktop app](#the-desktop-app)
 4. [Tool reference](#tool-reference)
@@ -86,6 +87,45 @@ The app accepts an optional file to open:
 > Dependencies are compiled with optimisations even in debug builds
 > (`[profile.dev.package."*"] opt-level = 3`), so `cargo run` without
 > `--release` is usable. Release builds are still several times faster.
+
+### In a web browser
+
+The same app also runs in a web page (WebAssembly). Every tool works there,
+and the desktop build is unaffected: the browser-specific parts are only
+compiled for the `wasm32` target.
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install trunk --locked
+
+cd crates/docforge-app
+trunk serve --release          # build and serve on http://127.0.0.1:8080
+trunk build --release          # or only build, into target/web/
+```
+
+`target/web/` (an `index.html`, a `.js` file and a ~16 MB `.wasm` file, about
+5 MB gzip-compressed) can be put on any static web server. The web build uses
+its own Cargo profile, `web-release` (link-time optimisation, stripped), so
+desktop release builds are untouched. For a smaller `.wasm` file, install
+binaryen (`wasm-opt`) and set `data-wasm-opt="3"` in
+`crates/docforge-app/index.html`.
+
+**Opening a project from the address.** `index.html?open=<url>` loads a
+project. It also loads the files its nodes read (each `path`/`font`
+setting), resolved relative to the project like on desktop. For example,
+serve the repository with `python3 test-projects/serve.py` and open
+<http://localhost:8000/target/web/index.html?open=../../test-projects/pcb-overlay.json>.
+
+**What is different in the browser:**
+
+| | Desktop | Browser |
+|---|---|---|
+| Files | Read and written on disk by path | Kept in memory for the tab. **Browse…**, **File → Open** and drag-and-drop copy a file in; nodes then find it by path. A project's relative paths also find a file opened from anywhere if the name matches one file |
+| Saving | Files are written; auto-save on every change | **Save now** / **Save PDF now** download the file; no auto-save. **File → Download project** saves the project |
+| Processing | On background threads; the UI never waits | On the page's only thread, between frames: the page pauses while a step runs (it shows "Working…" first). Dragging a slider updates the preview when you pause |
+| Speed | Full speed, multi-core | Roughly 2× slower and single-core (e.g. the Enhance test project: 186 ms vs 392 ms) |
+| Projects that read files | Load at once | Open their input files again in the tab (or use `?open=`) |
+| A crashing node | Reported; the app keeps running | Stops the page (reload it) |
 
 ---
 
@@ -901,15 +941,16 @@ intermediate image, expose it from the node through `Node::probe`.
 crates/
 ├── docforge-core    Engine: Node trait, Graph (wiring, cached evaluation,
 │                    cycle checks, persistence), RasterImage, PdfDocument,
-│                    NodeRegistry, groups
+│                    NodeRegistry, groups, files (disk, or memory on the web)
 ├── docforge-nodes   The tools: input_image, output_image, enhance (filters,
 │                    document detection, overlays), print (packing, PDF
 │                    writer, vector art), pdf (content analysis, shared
 │                    PDF helpers), pdf_input (loading, image extraction),
 │                    pdf_edit (crop, recolour), pdf_overlay (stacking)
 └── docforge-app     egui/eframe GUI: canvas, inspector, image/PDF preview,
-                     background evaluator, thumbnails
-reference-code/      Original grid tool and sample PDFs
+                     background evaluator, thumbnails; web entry point,
+                     index.html and Trunk.toml for the browser build
+test-projects/       Projects and inputs for trying the app; test scripts
 ```
 
 - **Data model:** values flow between nodes as `Arc<RasterImage>` (RGBA8 plus
@@ -923,7 +964,10 @@ reference-code/      Original grid tool and sample PDFs
 - **Responsive GUI:** the UI owns the project and sends snapshots to a
   background evaluator, which syncs its own graph (keeping caches) and posts
   results back. A newer edit cancels work in progress. PDF pages and
-  thumbnails are rendered on their own threads.
+  thumbnails are rendered on their own threads. In a web page, which has
+  no threads, the same work runs between frames (`background.rs`).
+- **Files:** nodes read and write through `docforge_core::files`: thin
+  wrappers around `std::fs` on desktop, an in-memory store in a web page.
 - **PDF output:** written with `lopdf`. Images are stored once per piece, and
   PDF artwork is embedded once as a reusable vector object (Form XObject).
 - **PDF input:** a small content-stream interpreter measures what is painted
@@ -964,6 +1008,19 @@ cargo build --release
 ./target/release/docforge test-projects/pcb-overlay.json   # open one
 test-projects/screenshots.sh                               # screenshot all → test-projects/out/
 ```
+
+### Testing the web version
+
+```sh
+cd crates/docforge-app && trunk build --release && cd ../..
+test-projects/web-screenshot.sh test-projects/out/web.png test-projects/pcb-overlay.json "select=3"
+```
+
+`web-screenshot.sh` serves the repository (`test-projects/serve.py`), opens
+the page in headless Firefox and saves a screenshot. The page's console goes
+to `<out>.png.log`. In a web page the test hooks below are page parameters
+(`?screenshot=1&select=3&edit_step=1&duplicate=1`) instead of environment
+variables.
 
 ### Automated GUI screenshots
 

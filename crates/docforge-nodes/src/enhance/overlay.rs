@@ -197,7 +197,7 @@ fn load_font(path: Option<&PathBuf>) -> Result<FontArc, NodeError> {
     let Some(path) = path.filter(|p| !p.as_os_str().is_empty()) else {
         return Ok(default_font().clone());
     };
-    let bytes = std::fs::read(path).map_err(|source| NodeError::Io {
+    let bytes = docforge_core::files::read(path).map_err(|source| NodeError::Io {
         path: path.clone(),
         source,
     })?;

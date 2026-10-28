@@ -3,13 +3,14 @@
 use std::{
     borrow::Cow,
     error::Error,
-    fs::{self, File},
-    io::{self, BufWriter, ErrorKind, Write},
+    io::{self, ErrorKind},
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use docforge_core::{EvalContext, Inputs, Node, NodeError, NodeType, PortSpec, RasterImage, Value};
+use docforge_core::{
+    EvalContext, Inputs, Node, NodeError, NodeType, PortSpec, RasterImage, Value, files,
+};
 use image::{
     ExtendedColorType, ImageEncoder,
     codecs::{
@@ -215,14 +216,14 @@ impl OutputImage {
         if self.create_dirs
             && let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty())
         {
-            fs::create_dir_all(parent).map_err(|source| NodeError::Io {
+            files::create_dir_all(parent).map_err(|source| NodeError::Io {
                 path: parent.to_owned(),
                 source,
             })?;
         }
 
         let dpi = self.dpi.or(image.dpi());
-        write_atomic(&target, |w| self.encode(image, format, dpi, w))?;
+        files::write_atomic(&target, |w| self.encode(image, format, dpi, w))?;
 
         if let Some(file) = FileStamp::read(&target) {
             self.last_written.set(Some(Written { requested, file }));
@@ -265,7 +266,7 @@ impl OutputImage {
         match self.if_exists {
             IfExists::Overwrite => Ok(requested.to_owned()),
             IfExists::Error => {
-                if !requested.exists() || own.as_deref() == Some(requested) {
+                if !files::exists(requested) || own.as_deref() == Some(requested) {
                     Ok(requested.to_owned())
                 } else {
                     Err(NodeError::Io {
@@ -281,12 +282,12 @@ impl OutputImage {
                 if let Some(own) = own {
                     return Ok(own);
                 }
-                if !requested.exists() {
+                if !files::exists(requested) {
                     return Ok(requested.to_owned());
                 }
                 (1..=9999)
                     .map(|n| numbered(requested, n))
-                    .find(|candidate| !candidate.exists())
+                    .find(|candidate| !files::exists(candidate))
                     .ok_or_else(|| NodeError::Io {
                         path: requested.to_owned(),
                         source: io::Error::new(ErrorKind::AlreadyExists, "no free numbered name"),
@@ -300,7 +301,7 @@ impl OutputImage {
         image: &RasterImage,
         format: SaveFormat,
         dpi: Option<f32>,
-        w: &mut BufWriter<File>,
+        w: &mut files::Sink,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let (width, height) = image.dimensions();
         let (data, color) = encodable_pixels(image, format.supports_alpha(), self.background);
@@ -360,7 +361,7 @@ fn encodable_pixels(
 /// PNG goes through the `png` crate directly because `image`'s encoder cannot
 /// write the `pHYs` (resolution) chunk.
 fn write_png(
-    w: &mut BufWriter<File>,
+    w: &mut files::Sink,
     data: &[u8],
     width: u32,
     height: u32,
@@ -390,36 +391,6 @@ fn write_png(
     let mut writer = encoder.write_header()?;
     writer.write_image_data(data)?;
     writer.finish()
-}
-
-/// Writes through a temporary sibling and renames it over `target`, so the
-/// target is either the old file or the complete new one, never partial.
-pub(crate) fn write_atomic(
-    target: &Path,
-    encode: impl FnOnce(&mut BufWriter<File>) -> Result<(), Box<dyn Error + Send + Sync>>,
-) -> Result<(), NodeError> {
-    let file_name = target.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = target.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
-    let io_err = |source| NodeError::Io {
-        path: target.to_owned(),
-        source,
-    };
-
-    let result = File::create(&tmp).map_err(io_err).and_then(|file| {
-        let mut writer = BufWriter::new(file);
-        encode(&mut writer).map_err(|source| NodeError::Encode {
-            path: target.to_owned(),
-            source,
-        })?;
-        writer.flush().map_err(io_err)?;
-        let file = writer.into_inner().map_err(|e| io_err(e.into_error()))?;
-        file.sync_data().map_err(io_err)?;
-        fs::rename(&tmp, target).map_err(io_err)
-    });
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
 }
 
 /// `dir/scan.png` → `dir/scan-3.png`.
@@ -459,7 +430,7 @@ impl Node for OutputImage {
             && self
                 .last_written
                 .get()
-                .is_some_and(|w| !w.file.path.exists())
+                .is_some_and(|w| !files::exists(&w.file.path))
     }
 }
 
@@ -471,6 +442,8 @@ impl NodeType for OutputImage {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use docforge_core::{Graph, NodeStatus};
     use image::{ColorType, DynamicImage};
 

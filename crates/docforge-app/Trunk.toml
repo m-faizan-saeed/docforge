@@ -1,0 +1,6 @@
+# Web build: `trunk build --release` (or `trunk serve --release`) in this folder.
+[build]
+target = "index.html"
+dist = "../../target/web"
+# Relative asset links, so the page works from any folder of a web server.
+public_url = "./"

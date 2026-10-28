@@ -1,6 +1,6 @@
 {"version": 1,
  "nodes": [
-  {"id": 0, "kind": "pdf_input", "params": {"path": "../reference-code/Simple SMPS.pdf"}, "meta": {"position": [0, 40], "label": "Simple SMPS"}},
+  {"id": 0, "kind": "pdf_input", "params": {"path": "inputs/simple-smps.pdf"}, "meta": {"position": [0, 40], "label": "Simple SMPS"}},
   {"id": 1, "kind": "pdf_edit", "meta": {"position": [240, 40], "label": "Assembly colours"}, "params": {
      "crop": "content",
      "recolor": {"mode": "replace", "tolerance": 24,

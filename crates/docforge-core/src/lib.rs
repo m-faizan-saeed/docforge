@@ -19,6 +19,7 @@
 //! several consumers never copies pixels.
 
 mod error;
+pub mod files;
 mod graph;
 mod group;
 mod node;

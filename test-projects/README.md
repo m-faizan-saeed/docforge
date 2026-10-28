@@ -18,7 +18,7 @@ cargo build --release
 | `pcb-guide-one-pdf.json` | PDF Input → PDF Edit → Print Layout | Recolour by palette (red → black, black → gray), crop to content, fill an A4 sheet |
 | `pcb-overlay.json` | PDF Input → 2 × PDF Edit → PDF Overlay → Print Layout | Assembly guide: gray bottom layer, black top layer (Multiply, nudged 4 × 3 mm). Reorder with ⏶⏷, drag a layer with **✥**, hide a layer, change blend/opacity |
 
-The PCB projects use `../reference-code/Simple SMPS.pdf`.
+The PCB projects use `inputs/simple-smps.pdf` (the reference PCB layout, also a test fixture).
 
 ## Inputs
 
@@ -38,3 +38,19 @@ test-projects/screenshots.sh
 
 If the window does not redraw under Wayland while the screen is off, run it
 with X11: `env -u WAYLAND_DISPLAY test-projects/screenshots.sh`.
+
+## Web version
+
+Build the web version (`trunk build --release` in `crates/docforge-app`),
+then:
+
+```sh
+python3 test-projects/serve.py        # http://localhost:8000
+# open http://localhost:8000/target/web/index.html?open=../../test-projects/pcb-overlay.json
+
+test-projects/web-screenshot.sh test-projects/out/web-overlay.png test-projects/pcb-overlay.json "select=3"
+```
+
+`web-screenshot.sh <out.png> [project] [hooks] [wait-ms]` screenshots the page
+in headless Firefox; hooks are page parameters such as `select=1&edit_step=0`.
+The page's console log is saved next to the PNG.

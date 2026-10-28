@@ -1,28 +1,26 @@
 //! Helpers for per-node runtime state that is never saved.
 
 use std::{
-    fmt, fs,
+    fmt,
     path::{Path, PathBuf},
     sync::{Mutex, PoisonError},
-    time::SystemTime,
 };
+
+use docforge_core::files::{self, Version};
 
 /// Identity of a file version: cheap to obtain (one `stat`) and changes
 /// whenever the file is rewritten.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FileStamp {
     pub path: PathBuf,
-    len: u64,
-    modified: Option<SystemTime>,
+    version: Version,
 }
 
 impl FileStamp {
     pub fn read(path: &Path) -> Option<Self> {
-        let meta = fs::metadata(path).ok()?;
         Some(Self {
             path: path.to_owned(),
-            len: meta.len(),
-            modified: meta.modified().ok(),
+            version: files::version(path)?,
         })
     }
 

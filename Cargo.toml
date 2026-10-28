@@ -27,3 +27,12 @@ tempfile = "3"
 # fast to compile but always optimise dependencies.
 [profile.dev.package."*"]
 opt-level = 3
+
+# The web build (used by trunk, see crates/docforge-app/index.html): smaller
+# download. Desktop builds keep the standard release profile.
+[profile.web-release]
+inherits = "release"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

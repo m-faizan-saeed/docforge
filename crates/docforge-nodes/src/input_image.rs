@@ -1,8 +1,10 @@
 //! Tool #1 — Input Image: the entry point that loads a file into the graph.
 
-use std::{borrow::Cow, fs, io::Cursor, path::PathBuf};
+use std::{borrow::Cow, io::Cursor, path::PathBuf};
 
-use docforge_core::{EvalContext, Inputs, Node, NodeError, NodeType, PortSpec, RasterImage, Value};
+use docforge_core::{
+    EvalContext, Inputs, Node, NodeError, NodeType, PortSpec, RasterImage, Value, files,
+};
 use image::{DynamicImage, ImageDecoder, ImageError, ImageReader, metadata::Orientation};
 use serde::{Deserialize, Serialize};
 
@@ -86,7 +88,7 @@ impl InputImage {
         // is not re-decoded on every pass.
         self.observed.set(Some(FileStamp::read(&path)));
 
-        let bytes = fs::read(&path).map_err(|source| NodeError::Io {
+        let bytes = files::read(&path).map_err(|source| NodeError::Io {
             path: path.clone(),
             source,
         })?;
@@ -142,6 +144,8 @@ impl NodeType for InputImage {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    use std::fs;
 
     use docforge_core::{Graph, NodeStatus};
     use image::{Rgba, RgbaImage};

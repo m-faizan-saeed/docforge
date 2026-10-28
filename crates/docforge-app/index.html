@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>docforge</title>
+    <!-- trunk builds the app (wasm) and links it here. For a smaller file,
+         install binaryen (wasm-opt) and set data-wasm-opt="3". -->
+    <link data-trunk rel="rust" data-bin="docforge" data-wasm-opt="0" data-cargo-profile="web-release">
+    <style>
+        html, body { margin: 0; height: 100%; overflow: hidden; background: #1b1b1b; }
+        canvas { display: block; width: 100%; height: 100%; }
+        #loading {
+            position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+            color: #ccc; font: 16px system-ui, sans-serif; flex-direction: column;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="docforge_canvas"></canvas>
+    <div id="loading">Loading docforge…</div>
+</body>
+</html>

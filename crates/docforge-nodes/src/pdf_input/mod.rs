@@ -4,9 +4,11 @@
 
 pub mod images;
 
-use std::{borrow::Cow, fs, path::PathBuf, sync::Arc};
+use std::{borrow::Cow, path::PathBuf, sync::Arc};
 
-use docforge_core::{EvalContext, Inputs, Node, NodeError, NodeType, PdfDocument, PortSpec, Value};
+use docforge_core::{
+    EvalContext, Inputs, Node, NodeError, NodeType, PdfDocument, PortSpec, Value, files,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -69,7 +71,7 @@ impl PdfInput {
         }
         let path = ctx.resolve_path(&self.path);
         self.observed.set(Some(FileStamp::read(&path)));
-        let bytes = fs::read(&path).map_err(|source| NodeError::Io {
+        let bytes = files::read(&path).map_err(|source| NodeError::Io {
             path: path.clone(),
             source,
         })?;

@@ -7,14 +7,13 @@ mod pdf;
 
 use std::{
     borrow::Cow,
-    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use docforge_core::{
     EvalContext, Inputs, Node, NodeError, NodeType, PdfDocument, PdfPageInfo, PortSpec,
-    RasterImage, Value,
+    RasterImage, Value, files,
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +23,7 @@ pub use pdf::CutMarks;
 use art::PdfArt;
 use pdf::Artwork;
 
-use crate::{output_image::write_atomic, runtime::RuntimeState};
+use crate::runtime::RuntimeState;
 
 /// Multi-input port: every connected image becomes one item, in connection order.
 pub const INPUT: &str = "images";
@@ -497,12 +496,12 @@ impl PrintLayout {
             path.set_extension("pdf");
         }
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent).map_err(|source| NodeError::Io {
+            files::create_dir_all(parent).map_err(|source| NodeError::Io {
                 path: parent.to_owned(),
                 source,
             })?;
         }
-        write_atomic(&path, |w| w.write_all(&doc.bytes).map_err(Into::into))?;
+        files::write_bytes_atomic(&path, &doc.bytes)?;
         self.last_written.set(Some(path.clone()));
         Ok(path)
     }

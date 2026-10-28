@@ -13,7 +13,10 @@ use hayro::{
     hayro_syntax::Pdf, vello_cpu::color::palette::css::WHITE,
 };
 
-use crate::viewport::{Overlay, Viewport};
+use crate::{
+    background::Background,
+    viewport::{Overlay, Viewport},
+};
 
 /// Logical units per inch: at 100% zoom a page appears roughly life-size.
 const LOGICAL_DPI: f32 = 96.0;
@@ -36,7 +39,7 @@ struct Rendered {
 pub struct PdfView {
     page: usize,
     viewport: Viewport,
-    requests: mpsc::Sender<Request>,
+    requests: Background<Request>,
     results: mpsc::Receiver<Rendered>,
     shown: Option<Rendered>,
     /// (document, page, dpi) of the render in flight.
@@ -45,33 +48,28 @@ pub struct PdfView {
 
 impl PdfView {
     pub fn new(ctx: egui::Context) -> Self {
-        let (req_tx, req_rx) = mpsc::channel::<Request>();
         let (res_tx, res_rx) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("docforge-pdf-render".into())
-            .spawn(move || {
-                while let Ok(mut req) = req_rx.recv() {
-                    while let Ok(newer) = req_rx.try_recv() {
-                        req = newer;
-                    }
-                    let image = render_page(&req.doc, req.page, req.dpi).map(Arc::new);
-                    let done = Rendered {
-                        doc: req.doc,
-                        page: req.page,
-                        dpi: req.dpi,
-                        image,
-                    };
-                    if res_tx.send(done).is_err() {
-                        return;
-                    }
+        let wake = ctx.clone();
+        let requests = Background::spawn(
+            "docforge-pdf-render",
+            move || wake.request_repaint(),
+            move |req: Request| {
+                let image = render_page(&req.doc, req.page, req.dpi).map(Arc::new);
+                let done = Rendered {
+                    doc: req.doc,
+                    page: req.page,
+                    dpi: req.dpi,
+                    image,
+                };
+                if res_tx.send(done).is_ok() {
                     ctx.request_repaint();
                 }
-            })
-            .expect("failed to start the PDF render thread");
+            },
+        );
         Self {
             page: 0,
             viewport: Viewport::default(),
-            requests: req_tx,
+            requests,
             results: res_rx,
             shown: None,
             requested: None,
@@ -114,6 +112,7 @@ impl PdfView {
         doc: &Arc<PdfDocument>,
         overlay: Option<Overlay<'_>>,
     ) {
+        self.requests.poll();
         if let Some(latest) = self.results.try_iter().last() {
             self.shown = Some(latest);
             self.requested = None;
@@ -158,7 +157,7 @@ impl PdfView {
             .as_ref()
             .map(|s| (Arc::as_ptr(&s.doc) as usize, s.page, s.dpi as u32));
         if shown_key != Some(key) && self.requested != Some(key) {
-            let _ = self.requests.send(Request {
+            self.requests.send(Request {
                 doc: Arc::clone(doc),
                 page: self.page,
                 dpi: wanted_dpi,
