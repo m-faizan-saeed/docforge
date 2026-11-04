@@ -49,6 +49,15 @@ const OPEN_IMAGE: &str = "open_image";
 #[cfg(target_arch = "wasm32")]
 const OPEN_URL: &str = "open_url";
 
+/// Screens narrower than this (in points, e.g. phones) start with the
+/// settings panel hidden.
+const NARROW_SCREEN: f32 = 700.0;
+/// Narrowest width the settings are laid out for (wider panels use their
+/// full width; narrower ones scroll sideways).
+const INSPECTOR_MIN_CONTENT: f32 = 340.0;
+/// Width the node graph and preview always keep next to the settings panel.
+const MIN_MAIN_WIDTH: f32 = 160.0;
+
 /// Marks clipboard text produced by docforge (see [`DocforgeApp::copy_selection`]).
 const CLIPBOARD_TAG: &str = "docforge-nodes";
 /// Where duplicates appear relative to their originals, in canvas units.
@@ -83,6 +92,9 @@ pub struct DocforgeApp {
     /// Preview this node regardless of the selection.
     pinned: Option<NodeId>,
     show_input: bool,
+    /// Whether the settings panel (inspector) is shown; decided from the
+    /// screen width on the first frame.
+    inspector_open: Option<bool>,
     /// The preview's edit mode last frame (node and step), to refit the
     /// view when entering or leaving it.
     preview_edit: Option<(NodeId, usize)>,
@@ -152,6 +164,7 @@ impl DocforgeApp {
             palette: None,
             pinned: None,
             show_input: false,
+            inspector_open: None,
             preview_edit: None,
             canvas: CanvasState::default(),
             viewport: Viewport::default(),
@@ -170,6 +183,8 @@ impl DocforgeApp {
             }),
         };
         app.new_document();
+        // Test hook: show or hide the settings panel at start.
+        app.inspector_open = test_hook("settings").map(|v| v != "hide");
         match open {
             Some(path) if is_project(&path) => app.open_project(&path),
             Some(path) => app.open_image(path),
@@ -998,6 +1013,11 @@ impl DocforgeApp {
                 ui.separator();
                 ui.label("Drop image files or .json projects onto the window.");
             });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let open = self.inspector_open.get_or_insert(true);
+                ui.toggle_value(open, "Settings")
+                    .on_hover_text("Show or hide the settings panel of the selected node");
+            });
         });
     }
 
@@ -1134,9 +1154,11 @@ impl DocforgeApp {
         }
         ui.separator();
 
-        egui::ScrollArea::vertical()
+        egui::ScrollArea::both()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                // Narrower than this, rows would overlap: scroll sideways instead.
+                ui.set_width(ui.available_width().max(INSPECTOR_MIN_CONTENT));
                 let mut edit_step = self
                     .edit_step
                     .filter(|(node, _)| *node == id)
@@ -1629,14 +1651,25 @@ impl eframe::App for DocforgeApp {
             self.results = Some(result);
         }
         self.handle_global_input(&ctx);
+        // Phones start with the settings hidden (the "Settings" button
+        // shows them).
+        let screen = ui.available_width();
+        self.inspector_open.get_or_insert(screen >= NARROW_SCREEN);
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-        egui::Panel::right("inspector")
-            .resizable(true)
-            .default_size(360.0)
-            .min_size(260.0)
-            .show(ui, |ui| self.inspector_panel(ui));
+        // The panel never takes the whole width: egui panels grow to fit their
+        // widest content and don't shrink back, so the width is capped and
+        // wider content scrolls sideways instead.
+        if self.inspector_open == Some(true) {
+            let max = (screen - MIN_MAIN_WIDTH).max(screen.min(200.0));
+            egui::Panel::right("inspector")
+                .resizable(true)
+                .default_size(360.0)
+                .min_size(260.0_f32.min(max))
+                .max_size(max)
+                .show(ui, |ui| self.inspector_panel(ui));
+        }
         egui::Panel::bottom("canvas")
             .resizable(true)
             .default_size(300.0)
@@ -1676,4 +1709,126 @@ fn test_hook(name: &str) -> Option<String> {
 fn is_project(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use eframe::egui::{
+        Context, Event, IdSalt, Modifiers, PointerButton, Pos2, RawInput, Rect,
+        containers::panel::PanelState, pos2, vec2,
+    };
+
+    use super::*;
+
+    /// The whole app, headless, on a `w`×`h` screen.
+    struct Harness {
+        ctx: Context,
+        app: DocforgeApp,
+        frame: eframe::Frame,
+        size: Vec2,
+        root: Option<egui::Id>,
+    }
+
+    impl Harness {
+        fn new(w: f32, h: f32) -> Self {
+            let ctx = Context::default();
+            let app = DocforgeApp::new(&eframe::CreationContext::_new_kittest(ctx.clone()), None);
+            Self {
+                ctx,
+                app,
+                frame: eframe::Frame::_new_kittest(),
+                size: vec2(w, h),
+                root: None,
+            }
+        }
+
+        fn step(&mut self, events: Vec<Event>) {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
+                events,
+                ..Default::default()
+            };
+            let (app, frame, root) = (&mut self.app, &mut self.frame, &mut self.root);
+            let mut out = self.ctx.run_ui(input, |ui| {
+                *root = Some(ui.scope_id());
+                eframe::App::ui(app, ui, frame);
+            });
+            out.textures_delta.clear(); // no renderer here
+        }
+
+        /// The settings panel's width (0 when hidden).
+        fn inspector_width(&self) -> f32 {
+            let id = self
+                .root
+                .expect("a frame ran")
+                .with_salt(IdSalt::new("inspector"));
+            match self.app.inspector_open {
+                Some(true) => PanelState::load(&self.ctx, id).map_or(0.0, |s| s.outer_rect.width()),
+                _ => 0.0,
+            }
+        }
+    }
+
+    use eframe::egui::Vec2;
+
+    /// One frame of a drag on the node graph (bottom left), back and forth.
+    fn drag_graph(i: usize) -> Vec<Event> {
+        let at = pos2(20.0 + (i % 10) as f32 * 6.0, 700.0);
+        let button = |pressed| Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        match i % 10 {
+            0 => vec![Event::PointerMoved(at), button(true)],
+            9 => vec![button(false)],
+            _ => vec![Event::PointerMoved(at)],
+        }
+    }
+
+    #[test]
+    fn phones_start_with_the_settings_hidden() {
+        let mut phone = Harness::new(390.0, 800.0);
+        phone.step(vec![]);
+        assert_eq!(phone.app.inspector_open, Some(false));
+        assert_eq!(phone.inspector_width(), 0.0);
+
+        let mut desktop = Harness::new(1400.0, 900.0);
+        desktop.step(vec![]);
+        assert_eq!(desktop.app.inspector_open, Some(true));
+        assert_eq!(desktop.inspector_width(), 360.0, "desktop layout unchanged");
+    }
+
+    /// egui panels grow to fit their widest content and never shrink back,
+    /// so selecting wide nodes used to ratchet the panel over the whole
+    /// screen of a phone.
+    #[test]
+    fn the_settings_panel_never_crowds_out_the_graph() {
+        let projects = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-projects");
+        let mut phone = Harness::new(390.0, 800.0);
+        phone.app.inspector_open = Some(true);
+        let limit = 390.0 - MIN_MAIN_WIDTH;
+        let mut frame = 0;
+        for project in [
+            "pcb-overlay.json",
+            "enhance-edit.json",
+            "pcb-guide-one-pdf.json",
+        ] {
+            phone.app.open_project(&projects.join(project));
+            let ids: Vec<NodeId> = phone.app.graph.nodes().map(|(id, _)| id).collect();
+            for id in ids {
+                phone.app.select(Some(id));
+                for _ in 0..20 {
+                    phone.step(drag_graph(frame));
+                    frame += 1;
+                    let width = phone.inspector_width();
+                    assert!(
+                        width <= limit + 0.5,
+                        "{project}, node {id}: settings panel {width} wide, more than {limit}"
+                    );
+                }
+            }
+        }
+    }
 }

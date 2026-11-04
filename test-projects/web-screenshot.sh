@@ -7,7 +7,8 @@
 # parameters, e.g. "select=3&edit_step=1" (like DOCFORGE_SELECT etc. on
 # desktop), or "simd=0" to test the build for older browsers.
 # Build first: `scripts/build.sh web` (or set WEB=target/web after a plain
-# `trunk build --release` in crates/docforge-app).
+# `trunk build --release` in crates/docforge-app). SIZE=390,844 sets the
+# window size (default 1440,900), e.g. to try a phone-sized screen.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 out=$(realpath -m "$1"); project=${2:-}; hooks=${3:-}; wait=${4:-30000}
@@ -30,6 +31,6 @@ cat > "$profile/user.js" <<'PREFS'
 user_pref("webgl.force-enabled", true);
 user_pref("devtools.console.stdout.content", true);
 PREFS
-firefox --headless --no-remote --profile "$profile" --window-size=1440,900 \
+firefox --headless --no-remote --profile "$profile" --window-size="${SIZE:-1440,900}" \
     --screenshot "$out" "$url" >"$out.log" 2>&1 || true
 echo "$out"

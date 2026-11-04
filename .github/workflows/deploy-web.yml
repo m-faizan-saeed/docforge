@@ -1,0 +1,50 @@
+# Builds the web app and deploys it to Vercel on every push to main (and on
+# demand from the Actions tab).
+#
+# Setup (once): in the GitHub repository, Settings → Secrets and variables →
+# Actions, add
+#   VERCEL_TOKEN       a token from https://vercel.com/account/tokens
+#   VERCEL_ORG_ID      "orgId"     from .vercel/project.json (after `npx vercel link`)
+#   VERCEL_PROJECT_ID  "projectId" from .vercel/project.json
+name: Deploy web app
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-web
+  cancel-in-progress: true
+
+env:
+  VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+  VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+  TRUNK_VERSION: 0.22.1
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust with the WebAssembly target
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target/wasm-simd\n. -> target/wasm-base"
+
+      - name: Install trunk
+        run: |
+          curl -sSfL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin trunk
+
+      - name: Build and deploy
+        run: |
+          npx --yes vercel@latest pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}
+          npx --yes vercel@latest build --prod --token=${{ secrets.VERCEL_TOKEN }}
+          npx --yes vercel@latest deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}

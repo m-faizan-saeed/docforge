@@ -145,6 +145,24 @@ WebGL2 (Chrome 56+, Firefox 51+, Safari 15+).
   `data-wasm-opt="3"` in `crates/docforge-app/index.html`.
 - **Development:** `trunk serve` builds a single, non-SIMD build.
 
+**Deploying to Vercel.** Vercel's build machines have no Rust, so the site
+is built on your computer (or in GitHub Actions) and the finished files are
+uploaded: a "prebuilt" deployment, configured in `vercel.json`.
+
+```sh
+npx vercel login                 # once
+npx vercel link                  # once: create or pick the Vercel project
+scripts/deploy-vercel.sh         # build and deploy to production
+scripts/deploy-vercel.sh preview # or to a separate preview address
+```
+
+To deploy on every push to `main` instead, use
+`.github/workflows/deploy-web.yml`. It needs three repository secrets:
+`VERCEL_TOKEN` (from <https://vercel.com/account/tokens>), plus
+`VERCEL_ORG_ID` and `VERCEL_PROJECT_ID` (from `.vercel/project.json` after
+`npx vercel link`). Vercel's own Git deployments are switched off in
+`vercel.json`, because they would try to build without Rust and fail.
+
 **Opening a project from the address.** `?open=<url>` loads a project. It
 also loads the files its nodes read (each `path`/`font` setting), resolved
 relative to the project like on desktop. For example, serve the repository
@@ -197,6 +215,14 @@ with `python3 test-projects/serve.py` and open
 ```
 
 All panels can be resized by dragging their borders.
+
+- **Settings button:** the button at the right of the menu bar shows or hides
+  the inspector.
+- **Narrow screens (below 700 points, e.g. phones):** the inspector starts
+  hidden.
+- **Width limit:** the inspector never grows past the point where the canvas
+  and preview would have less than 160 points. Settings that don't fit
+  scroll sideways.
 
 ### Node canvas
 
@@ -1072,6 +1098,8 @@ DOCFORGE_SCREENSHOT=shot.png DOCFORGE_SELECT=1 ./target/release/docforge project
 - `DOCFORGE_SELECT`: select the node with this id first, so its panel and
   preview are shown. A comma-separated list selects several nodes.
 - `DOCFORGE_DUPLICATE=1`: duplicate the selection at start-up, as Ctrl+D does.
+- `DOCFORGE_SETTINGS=show|hide`: show or hide the settings panel at start
+  (it starts hidden on screens narrower than 700 points, e.g. phones).
 - `DOCFORGE_THEME=light|dark`: force a theme (the app normally follows the
   system's).
 - `DOCFORGE_EDIT_STEP=N`: open preview editing for step *N* (0-based) of the
