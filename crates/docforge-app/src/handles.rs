@@ -7,8 +7,8 @@
 //! returns `true` when the user changed the shape this frame.
 
 use eframe::egui::{
-    self, Color32, CursorIcon, Id, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, pos2,
-    vec2,
+    self, Color32, Context, CursorIcon, Id, LayerId, Order, Pos2, Rect, Sense, Shape, Stroke,
+    StrokeKind, TextureId, Ui, Vec2, pos2, vec2,
 };
 
 /// Where the image is on screen.
@@ -18,6 +18,8 @@ pub struct ImageFrame {
     pub rect: Rect,
     /// The visible viewport (handles are clipped to it).
     pub clip: Rect,
+    /// The image's texture, for the magnifier shown while dragging by touch.
+    pub texture: Option<TextureId>,
 }
 
 impl ImageFrame {
@@ -37,6 +39,30 @@ impl ImageFrame {
 /// Smallest size a rectangle may be resized to, as a fraction of the image.
 const MIN_SIZE: f32 = 0.005;
 const GRIP: f32 = 9.0;
+/// Side of a grip's hit area with a mouse, and on a touch screen (a
+/// fingertip is far less precise than a cursor).
+const HIT_MOUSE: f32 = GRIP * 1.8;
+const HIT_TOUCH: f32 = GRIP * 3.5;
+
+/// Where [`dragging`] keeps the frame in which a handle was last dragged.
+const DRAG_MARK: &str = "docforge_handle_drag";
+
+/// Whether a handle is being dragged this frame (the finger or button may be
+/// resting). Call after the handles were drawn.
+pub fn dragging(ctx: &Context) -> bool {
+    ctx.data(|d| d.get_temp::<u64>(Id::unique(DRAG_MARK)))
+        .is_some_and(|frame| frame == ctx.cumulative_frame_nr())
+}
+
+/// Notes a dragged handle for [`dragging`]; passes the response through.
+fn track(ui: &Ui, response: egui::Response) -> egui::Response {
+    if response.dragged() {
+        let frame = ui.ctx().cumulative_frame_nr();
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(Id::unique(DRAG_MARK), frame));
+    }
+    response
+}
 
 /// The part of a rectangle being dragged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,13 +153,20 @@ fn clamp_point([x, y]: [f32; 2]) -> [f32; 2] {
 
 /// One square grip; returns its response.
 fn grip(ui: &mut Ui, frame: &ImageFrame, id: Id, at: Pos2, cursor: CursorIcon) -> egui::Response {
-    let response = ui
-        .interact(
-            Rect::from_center_size(at, Vec2::splat(GRIP * 1.8)),
+    let hit = if ui.input(|i| i.has_touch_screen()) {
+        HIT_TOUCH
+    } else {
+        HIT_MOUSE
+    };
+    let response = track(
+        ui,
+        ui.interact(
+            Rect::from_center_size(at, Vec2::splat(hit)),
             id,
             Sense::drag(),
-        )
-        .on_hover_cursor(cursor);
+        ),
+    )
+    .on_hover_cursor(cursor);
     let active = response.hovered() || response.dragged();
     let size = if active { GRIP + 3.0 } else { GRIP };
     let painter = ui.painter_at(frame.clip);
@@ -167,6 +200,97 @@ fn outline(painter: &egui::Painter, points: Vec<Pos2>, closed: bool, color: Colo
     }
 }
 
+/// Side of the magnifier, in screen points, and how much it enlarges.
+const LOUPE_SIZE: f32 = 132.0;
+const LOUPE_ZOOM: f32 = 3.0;
+/// Space between the finger and the magnifier's edge.
+const LOUPE_GAP: f32 = 44.0;
+
+/// Where the magnifier goes for a finger at `finger`: above it, or beside
+/// it near the top, always inside `bounds` (the screen).
+fn loupe_rect(finger: Pos2, bounds: Rect) -> Rect {
+    let reach = LOUPE_SIZE / 2.0 + LOUPE_GAP;
+    let mut centre = finger - vec2(0.0, reach);
+    if centre.y - LOUPE_SIZE / 2.0 < bounds.top() {
+        // No room above: to the side away from the nearer screen edge.
+        let side = if finger.x > bounds.center().x {
+            -reach
+        } else {
+            reach
+        };
+        centre = finger + vec2(side, 0.0);
+    }
+    let r = Rect::from_center_size(centre, Vec2::splat(LOUPE_SIZE));
+    let shift = vec2(
+        (bounds.left() - r.left()).max(0.0) + (bounds.right() - r.right()).min(0.0),
+        (bounds.top() - r.top()).max(0.0) + (bounds.bottom() - r.bottom()).min(0.0),
+    );
+    r.translate(shift)
+}
+
+/// While a finger drags a grip, shows the image around the grip enlarged,
+/// beside the finger, so the spot under the fingertip stays visible.
+/// `at` is the grip (normalised); `shape` is the edited outline, drawn too.
+fn magnifier(
+    ui: &Ui,
+    frame: &ImageFrame,
+    at: [f32; 2],
+    shape: &[[f32; 2]],
+    closed: bool,
+    color: Color32,
+) {
+    let (touching, finger) = ui.input(|i| (i.any_touches(), i.pointer.interact_pos()));
+    let (true, Some(finger), Some(texture)) = (touching, finger, frame.texture) else {
+        return;
+    };
+    let loupe = loupe_rect(finger, ui.ctx().content_rect());
+    let target = frame.screen(at);
+    let map = |p: Pos2| loupe.center() + (p - target) * LOUPE_ZOOM;
+    let layer = ui.ctx().layer_painter(LayerId::new(
+        Order::Foreground,
+        Id::unique("docforge_loupe"),
+    ));
+    let painter = layer.with_clip_rect(loupe);
+    painter.rect_filled(loupe, 0.0, Color32::from_gray(45));
+    let source =
+        Rect::from_center_size(target, Vec2::splat(LOUPE_SIZE / LOUPE_ZOOM)).intersect(frame.rect);
+    if source.is_positive() {
+        let size = frame.rect.size().max(Vec2::splat(1e-3));
+        let uv = |p: Pos2| ((p - frame.rect.min) / size).to_pos2();
+        painter.image(
+            texture,
+            Rect::from_min_max(map(source.min), map(source.max)),
+            Rect::from_min_max(uv(source.min), uv(source.max)),
+            Color32::WHITE,
+        );
+    }
+    if shape.len() >= 2 {
+        let points = shape.iter().map(|p| map(frame.screen(*p))).collect();
+        outline(&painter, points, closed, color, false);
+    }
+    // Crosshair on the exact spot, open in the middle so the pixel shows.
+    let c = loupe.center();
+    for (dir, len) in [(vec2(1.0, 0.0), 14.0), (vec2(0.0, 1.0), 14.0)] {
+        for sign in [-1.0, 1.0] {
+            let seg = [c + dir * sign * 4.0, c + dir * sign * len];
+            painter.line_segment(seg, Stroke::new(3.0, Color32::from_black_alpha(160)));
+            painter.line_segment(seg, Stroke::new(1.2, Color32::WHITE));
+        }
+    }
+    layer.rect_stroke(
+        loupe,
+        0.0,
+        Stroke::new(3.0, Color32::from_black_alpha(160)),
+        StrokeKind::Outside,
+    );
+    layer.rect_stroke(
+        loupe,
+        0.0,
+        Stroke::new(1.5, Color32::WHITE),
+        StrokeKind::Inside,
+    );
+}
+
 /// A single draggable point (e.g. a watermark's centre).
 pub fn point(ui: &mut Ui, frame: &ImageFrame, id: Id, p: &mut [f32; 2], color: Color32) -> bool {
     let at = frame.screen(*p);
@@ -182,12 +306,16 @@ pub fn point(ui: &mut Ui, frame: &ImageFrame, id: Id, p: &mut [f32; 2], color: C
         painter.line_segment([at + a, at + b], Stroke::new(1.5, color));
     }
     let r = grip(ui, frame, id, at, CursorIcon::Grab);
+    let mut changed = false;
     if r.dragged() && r.drag_delta() != Vec2::ZERO {
         let [dx, dy] = frame.delta(r.drag_delta());
         *p = clamp_point([p[0] + dx, p[1] + dy]);
-        return true;
+        changed = true;
     }
-    false
+    if r.dragged() {
+        magnifier(ui, frame, *p, &[], false, color);
+    }
+    changed
 }
 
 /// A line with draggable ends and a grip in the middle that moves it whole.
@@ -208,6 +336,7 @@ pub fn line(
         false,
     );
     let mut changed = false;
+    let mut held = None;
     for (i, end) in [&mut *a, &mut *b].into_iter().enumerate() {
         let r = grip(
             ui,
@@ -221,6 +350,12 @@ pub fn line(
             *end = clamp_point([end[0] + dx, end[1] + dy]);
             changed = true;
         }
+        if r.dragged() {
+            held = Some(i);
+        }
+    }
+    if let Some(i) = held {
+        magnifier(ui, frame, [*a, *b][i], &[*a, *b], false, color);
     }
     let mid = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
     let r = grip(
@@ -292,12 +427,15 @@ pub fn rect(
 
     let mut next = current;
     // The body first, so the grips (registered later) win where they overlap.
-    let body = ui
-        .interact(screen.shrink(GRIP), id.with("body"), Sense::drag())
-        .on_hover_cursor(Grip::Move.cursor());
+    let body = track(
+        ui,
+        ui.interact(screen.shrink(GRIP), id.with("body"), Sense::drag()),
+    )
+    .on_hover_cursor(Grip::Move.cursor());
     if body.dragged() && body.drag_delta() != Vec2::ZERO {
         next = resize(next, Grip::Move, frame.delta(body.drag_delta()));
     }
+    let mut held = None;
     for g in Grip::ALL_EDGES {
         let resp = grip(
             ui,
@@ -309,6 +447,14 @@ pub fn rect(
         if resp.dragged() && resp.drag_delta() != Vec2::ZERO {
             next = resize(next, g, frame.delta(resp.drag_delta()));
         }
+        if resp.dragged() {
+            held = Some(g);
+        }
+    }
+    if let Some(g) = held {
+        let [x0, y0, x1, y1] = next;
+        let corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+        magnifier(ui, frame, g.anchor(next), &corners, true, color);
     }
     if next != current {
         *r = next;
@@ -342,9 +488,11 @@ pub fn movable(
         color,
         false,
     );
-    let body = ui
-        .interact(screen.intersect(frame.clip), id.with("body"), Sense::drag())
-        .on_hover_cursor(CursorIcon::Grab);
+    let body = track(
+        ui,
+        ui.interact(screen.intersect(frame.clip), id.with("body"), Sense::drag()),
+    )
+    .on_hover_cursor(CursorIcon::Grab);
     let centre = grip(
         ui,
         frame,
@@ -395,6 +543,7 @@ pub fn quad(
         dashed,
     );
     let mut changed = false;
+    let mut held = None;
     for (i, corner) in q.iter_mut().enumerate() {
         let r = grip(
             ui,
@@ -408,6 +557,12 @@ pub fn quad(
             *corner = clamp_point([corner[0] + dx, corner[1] + dy]);
             changed = true;
         }
+        if r.dragged() {
+            held = Some(i);
+        }
+    }
+    if let Some(i) = held {
+        magnifier(ui, frame, q[i], q, true, color);
     }
     changed
 }
@@ -454,10 +609,36 @@ mod tests {
         let f = ImageFrame {
             rect: Rect::from_min_size(pos2(100.0, 50.0), vec2(400.0, 200.0)),
             clip: Rect::EVERYTHING,
+            texture: None,
         };
         assert_eq!(f.screen([0.5, 0.25]), pos2(300.0, 100.0));
         assert_eq!(f.delta(vec2(40.0, -20.0)), [0.1, -0.1]);
         assert_eq!(ordered([0.8, 0.9, 0.1, 0.2]), [0.1, 0.2, 0.8, 0.9]);
+    }
+
+    #[test]
+    fn the_magnifier_sits_beside_the_finger_and_on_screen() {
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 800.0));
+        let clear = |r: Rect, finger: Pos2| {
+            assert!(screen.contains_rect(r), "{r:?} off screen");
+            assert!(
+                !r.expand(LOUPE_GAP / 2.0).contains(finger),
+                "{r:?} under the finger"
+            );
+        };
+        // Mid-screen: straight above.
+        let finger = pos2(200.0, 500.0);
+        let r = loupe_rect(finger, screen);
+        assert!(r.bottom() < finger.y && (r.center().x - 200.0).abs() < 1e-3);
+        clear(r, finger);
+        // Near the top: beside, away from the near edge.
+        for finger in [pos2(30.0, 20.0), pos2(380.0, 20.0)] {
+            let r = loupe_rect(finger, screen);
+            assert!((r.center().x - finger.x).abs() > LOUPE_SIZE / 2.0);
+            clear(r, finger);
+        }
+        // Near a side: slid back onto the screen.
+        clear(loupe_rect(pos2(5.0, 500.0), screen), pos2(5.0, 500.0));
     }
 }
 
@@ -465,7 +646,9 @@ mod tests {
 /// egui context — no window or GPU needed.
 #[cfg(test)]
 mod interaction_tests {
-    use eframe::egui::{Context, Event, Modifiers, PointerButton, RawInput};
+    use eframe::egui::{
+        Context, Event, Modifiers, PointerButton, RawInput, TouchDeviceId, TouchId, TouchPhase,
+    };
 
     use super::*;
 
@@ -480,26 +663,63 @@ mod interaction_tests {
             min: pos2(0.0, 0.0),
             max: pos2(800.0, 800.0),
         },
+        texture: None,
     };
 
     /// Presses at `from`, drags to `to` in a few steps, releases; `draw`
     /// runs every frame like the app's overlay does.
-    fn drag(from: Pos2, to: Pos2, mut draw: impl FnMut(&mut Ui)) {
-        let ctx = Context::default();
+    fn drag(from: Pos2, to: Pos2, draw: impl FnMut(&mut Ui)) {
+        drag_by(&Context::default(), false, from, to, draw);
+    }
+
+    /// [`drag`] with a mouse or with a finger, sending the events eframe's
+    /// web runner sends for a touch: the press comes without a pointer move
+    /// (the pointer may still be where an earlier touch ended), and lifting
+    /// the finger ends with `PointerGone`. Returns each frame's shapes.
+    fn drag_by(
+        ctx: &Context,
+        touch: bool,
+        from: Pos2,
+        to: Pos2,
+        mut draw: impl FnMut(&mut Ui),
+    ) -> Vec<Vec<egui::epaint::ClippedShape>> {
+        let finger = |phase, pos| Event::Touch {
+            device_id: TouchDeviceId(0),
+            id: TouchId(1),
+            phase,
+            pos,
+            force: None,
+        };
         let button = |pressed| Event::PointerButton {
             pos: if pressed { from } else { to },
             button: PointerButton::Primary,
             pressed,
             modifiers: Modifiers::NONE,
         };
-        let mut frames = vec![vec![Event::PointerMoved(from)], vec![button(true)]];
+        let mut frames = if touch {
+            vec![vec![], vec![button(true), finger(TouchPhase::Start, from)]]
+        } else {
+            vec![vec![Event::PointerMoved(from)], vec![button(true)]]
+        };
         for i in 1..=4 {
-            frames.push(vec![Event::PointerMoved(
-                from + (to - from) * (i as f32 / 4.0),
-            )]);
+            let pos = from + (to - from) * (i as f32 / 4.0);
+            frames.push(vec![Event::PointerMoved(pos)]);
+            if touch {
+                frames
+                    .last_mut()
+                    .unwrap()
+                    .push(finger(TouchPhase::Move, pos));
+            }
         }
         frames.push(vec![button(false)]);
+        if touch {
+            frames
+                .last_mut()
+                .unwrap()
+                .extend([finger(TouchPhase::End, to), Event::PointerGone]);
+        }
         frames.push(vec![]);
+        let mut shapes = Vec::new();
         for events in frames {
             let input = RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 800.0))),
@@ -509,7 +729,9 @@ mod interaction_tests {
             let mut output = ctx.run_ui(input, |ui| draw(ui));
             // No renderer here: discard the font atlas uploads.
             output.textures_delta.clear();
+            shapes.push(output.shapes);
         }
+        shapes
     }
 
     #[track_caller]
@@ -577,5 +799,55 @@ mod interaction_tests {
         });
         close(a[1], 0.6);
         close(b[1], 0.6);
+    }
+
+    #[test]
+    fn dragging_is_reported_while_a_grip_is_held_and_not_after() {
+        let mut r = [0.25, 0.25, 0.75, 0.75];
+        let mut seen = Vec::new();
+        drag(pos2(400.0, 300.0), pos2(440.0, 300.0), |ui| {
+            rect(ui, &FRAME, Id::unique("r"), &mut r, Color32::WHITE, true);
+            seen.push(dragging(ui.ctx()));
+        });
+        assert!(seen.iter().any(|&d| d), "reported during the drag");
+        assert!(!seen.last().unwrap(), "cleared after release");
+        assert!(!seen.first().unwrap(), "not before pressing");
+    }
+
+    #[test]
+    fn a_finger_dragging_a_grip_gets_a_magnifier_and_a_mouse_does_not() {
+        let texture = TextureId::User(7);
+        let frame = ImageFrame {
+            texture: Some(texture),
+            ..FRAME
+        };
+        let magnified = |shapes: &Vec<egui::epaint::ClippedShape>| {
+            shapes.iter().any(|c| match &c.shape {
+                Shape::Mesh(m) => m.texture_id == texture,
+                _ => false,
+            })
+        };
+        for touch in [true, false] {
+            let ctx = Context::default();
+            let mut r = [0.25, 0.25, 0.75, 0.75];
+            // East grip at (400, 300) → 40 px right; then the south grip,
+            // now at (320, 400), 40 px down: the second touch starts far
+            // from where the first ended.
+            let mut shown = Vec::new();
+            for (from, to) in [
+                (pos2(400.0, 300.0), pos2(440.0, 300.0)),
+                (pos2(320.0, 400.0), pos2(320.0, 440.0)),
+            ] {
+                let frames = drag_by(&ctx, touch, from, to, |ui| {
+                    rect(ui, &frame, Id::unique("r"), &mut r, Color32::WHITE, true);
+                });
+                assert!(!magnified(frames.last().unwrap()), "gone after lifting");
+                shown.extend(frames.iter().map(magnified));
+            }
+            close(r[2], 0.85);
+            close(r[3], 0.85);
+            assert_eq!((r[0], r[1]), (0.25, 0.25), "touch: {touch}");
+            assert_eq!(shown.iter().any(|&m| m), touch, "touch: {touch}, {shown:?}");
+        }
     }
 }

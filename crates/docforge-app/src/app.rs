@@ -508,6 +508,12 @@ impl DocforgeApp {
     }
 
     fn submit_if_needed(&mut self) {
+        // On the web, evaluation runs on the UI thread and would stall every
+        // frame of a handle drag: evaluate once the handle is let go. The
+        // handles follow the pointer by themselves meanwhile.
+        if cfg!(target_arch = "wasm32") && handles::dragging(&self.ctx) {
+            return;
+        }
         let probes = self.wanted_probes();
         let stale = self.rev != self.submitted_rev || probes != self.submitted_probes;
         let poll = self.last_submit.elapsed() >= FILE_POLL && !self.evaluator.is_busy();

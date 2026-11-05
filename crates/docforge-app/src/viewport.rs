@@ -202,6 +202,7 @@ impl Viewport {
                 &ImageFrame {
                     rect: image_rect,
                     clip: rect,
+                    texture: self.shown.as_ref().map(|s| s.texture.id()),
                 },
             );
         }
