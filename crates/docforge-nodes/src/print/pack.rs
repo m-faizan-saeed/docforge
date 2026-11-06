@@ -8,6 +8,11 @@
 //! cut) and best-short-side-fit (densest) — on both page orientations, and
 //! the layout with the fewest pages and the most compact use of them wins.
 //!
+//! With [`Request::keep_order`] the pieces are instead placed in the order
+//! given, like words on a page: left to right in rows, a new row when one
+//! is full, a new page when the page is. The sheets then read in that order,
+//! at the cost of some paper.
+//!
 //! All units are millimetres with the origin at the page's top-left corner.
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,6 +97,9 @@ pub struct Request<'a> {
     /// Space left between pieces (for cutting).
     pub gap: f32,
     pub allow_rotation: bool,
+    /// Place the items in their given order (copies of an item together)
+    /// instead of biggest first.
+    pub keep_order: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -114,9 +122,15 @@ pub fn pack(req: &Request<'_>) -> Option<Packing> {
         Orientation::Landscape => &[landscape],
         Orientation::Auto => &[portrait, landscape],
     };
+    // Rows in reading order don't use the MaxRects heuristics: one try.
+    let heuristics: &[Heuristic] = if req.keep_order {
+        &[Heuristic::Rows]
+    } else {
+        &[Heuristic::Rows, Heuristic::BestShortSide]
+    };
     let mut best: Option<(Packing, f32)> = None;
     for &page in pages {
-        for heuristic in [Heuristic::Rows, Heuristic::BestShortSide] {
+        for &heuristic in heuristics {
             let Some(packing) = pack_on(req, page, heuristic) else {
                 continue;
             };
@@ -182,13 +196,19 @@ fn pack_on(req: &Request<'_>, page: [f32; 2], heuristic: Heuristic) -> Option<Pa
         let [w, h] = req.sizes[i].map(|v| v * scale[i]);
         (w.max(h), w.min(h))
     };
-    queue.sort_by(|&(a, ca), &(b, cb)| {
-        key(b)
-            .partial_cmp(&key(a))
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.cmp(&b))
-            .then(ca.cmp(&cb))
-    });
+    if !req.keep_order {
+        queue.sort_by(|&(a, ca), &(b, cb)| {
+            key(b)
+                .partial_cmp(&key(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(&b))
+                .then(ca.cmp(&cb))
+        });
+    }
+
+    if req.keep_order {
+        return Some(in_rows(req, page, area, &queue, scale));
+    }
 
     let mut bins: Vec<Bin> = Vec::new();
     let mut placements = Vec::with_capacity(queue.len());
@@ -235,6 +255,78 @@ fn pack_on(req: &Request<'_>, page: [f32; 2], heuristic: Heuristic) -> Option<Pa
         placements,
         scale,
     })
+}
+
+/// Places `queue` in its order, in rows like text: each piece goes right of
+/// the previous one, or starts a new row below the tallest piece of the
+/// current row, or starts a new page. A piece is turned only when it fits on
+/// neither the current row nor a new one upright, so copies of a piece face
+/// the same way.
+fn in_rows(
+    req: &Request<'_>,
+    page: [f32; 2],
+    area: [f32; 2],
+    queue: &[(usize, u32)],
+    scale: Vec<f32>,
+) -> Packing {
+    let mut placements = Vec::with_capacity(queue.len());
+    let (mut page_index, mut x, mut y, mut row_h) = (0, 0.0f32, 0.0f32, 0.0f32);
+    for &(item, copy) in queue {
+        let [w, h] = req.sizes[item].map(|v| v * scale[item] + req.gap);
+        let mut options = vec![(w, h, false)];
+        if req.allow_rotation && (w - h).abs() > EPS {
+            options.push((h, w, true));
+        }
+        let fits = |x: f32, y: f32, (w, h, _): (f32, f32, bool)| {
+            x + w <= area[0] + EPS && y + h <= area[1] + EPS
+        };
+        let here = options.iter().find_map(|&o| {
+            if fits(x, y, o) {
+                Some((o, false))
+            } else if fits(0.0, y + row_h, o) {
+                Some((o, true))
+            } else {
+                None
+            }
+        });
+        let (pw, ph, rotated) = if let Some((o, new_row)) = here {
+            if new_row {
+                (x, y, row_h) = (0.0, y + row_h, 0.0);
+            }
+            o
+        } else {
+            if x > 0.0 || y > 0.0 {
+                page_index += 1;
+            }
+            (x, y, row_h) = (0.0, 0.0, 0.0);
+            // Items were scaled to fit an empty page one way or the other.
+            options
+                .iter()
+                .copied()
+                .find(|&o| fits(0.0, 0.0, o))
+                .unwrap_or(options[0])
+        };
+        placements.push(Placement {
+            item,
+            copy,
+            page: page_index,
+            rect: Rect {
+                x: x + req.margin,
+                y: y + req.margin,
+                w: pw - req.gap,
+                h: ph - req.gap,
+            },
+            rotated,
+        });
+        x += pw;
+        row_h = row_h.max(ph);
+    }
+    Packing {
+        page,
+        pages: page_index + 1,
+        placements,
+        scale,
+    }
 }
 
 struct Bin {
@@ -363,6 +455,7 @@ mod tests {
             margin: 10.0,
             gap: 4.0,
             allow_rotation: true,
+            keep_order: false,
         }
     }
 
@@ -430,6 +523,60 @@ mod tests {
         // The small piece fits beside the first big one, not on a third page.
         let small = p.placements.iter().find(|pl| pl.item == 1).unwrap();
         assert!(small.page < 2);
+    }
+
+    #[test]
+    fn kept_order_reads_like_text() {
+        // Small first, then big: biggest-first would start with a big one.
+        let sizes = [[50.0, 50.0], [180.0, 200.0], [60.0, 40.0], [180.0, 200.0]];
+        let mut req = request(&sizes, &[2, 1, 1, 1]);
+        req.orientation = Orientation::Portrait;
+        req.keep_order = true;
+        let p = pack(&req).unwrap();
+        assert_valid(&p, &req);
+        let order: Vec<(usize, u32)> = p.placements.iter().map(|pl| (pl.item, pl.copy)).collect();
+        assert_eq!(order, [(0, 0), (0, 1), (1, 0), (2, 0), (3, 0)]);
+        // Reading order: each piece is right of the previous one in its
+        // row, or below the whole previous row, or on a later page.
+        for w in p.placements.windows(2) {
+            let (a, b) = (&w[0], &w[1]);
+            let next_in_row = b.page == a.page && b.rect.y == a.rect.y && b.rect.x > a.rect.x;
+            let below = b.page == a.page && b.rect.y >= a.rect.bottom();
+            assert!(next_in_row || below || b.page > a.page, "{a:?} then {b:?}");
+        }
+        // The squares share a row; the 60 × 40 piece doesn't jump into the
+        // gap beside them (above the big piece placed before it) but starts
+        // the next page, where the second big piece follows below it.
+        assert_eq!(p.placements[0].rect.y, p.placements[1].rect.y);
+        assert_eq!(p.placements[2].page, 0);
+        assert_eq!([p.placements[3].page, p.placements[4].page], [1, 1]);
+        assert_eq!(p.pages, 2);
+
+        // Biggest first (the default) starts with a big piece instead.
+        req.keep_order = false;
+        let p = pack(&req).unwrap();
+        assert_eq!(p.placements[0].item, 1);
+    }
+
+    #[test]
+    fn kept_order_turns_pieces_only_to_stay_in_the_row() {
+        // ID cards in a row on portrait A4 (190 mm wide): two fit upright
+        // (2 × 89.6); the third goes to the next row rather than turning.
+        let mut req = request(&[ID_CARD], &[3]);
+        req.orientation = Orientation::Portrait;
+        req.keep_order = true;
+        let p = pack(&req).unwrap();
+        assert_valid(&p, &req);
+        assert!(p.placements.iter().all(|pl| !pl.rotated));
+        assert_eq!(p.placements[2].rect.x, p.placements[0].rect.x);
+        assert!(p.placements[2].rect.y > p.placements[0].rect.y);
+        // A piece too wide for the page upright is turned.
+        let mut req = request(&[[250.0, 100.0]], &[1]);
+        req.orientation = Orientation::Portrait;
+        req.keep_order = true;
+        let p = pack(&req).unwrap();
+        assert_valid(&p, &req);
+        assert!(p.placements[0].rotated);
     }
 
     #[test]

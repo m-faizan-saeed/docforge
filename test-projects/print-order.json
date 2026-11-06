@@ -1,0 +1,28 @@
+{"version": 1,
+ "nodes": [
+  {"id": 0, "kind": "input_image", "params": {"path": "inputs/photo.jpg"}, "meta": {"position": [0, 40], "label": "Phone photo"}},
+  {"id": 1, "kind": "enhance_image", "meta": {"position": [240, 0], "label": "Header strip"}, "params": {"steps": [
+    {"effect": "detect_document"},
+    {"effect": "crop", "left": 0.0, "top": 0.0, "right": 0.0, "bottom": 0.8}
+  ]}},
+  {"id": 2, "kind": "enhance_image", "meta": {"position": [240, 110], "label": "Whole page"}, "params": {"steps": [
+    {"effect": "detect_document"}
+  ]}},
+  {"id": 3, "kind": "enhance_image", "meta": {"position": [240, 220], "label": "Stamp"}, "params": {"steps": [
+    {"effect": "detect_document"},
+    {"effect": "crop", "left": 0.55, "top": 0.75, "right": 0.05, "bottom": 0.05}
+  ]}},
+  {"id": 4, "kind": "print_layout", "meta": {"position": [520, 80]}, "params": {
+     "items": [{"size": {"mode": "width", "width_mm": 120}, "copies": 2},
+               {"size": {"mode": "width", "width_mm": 150}},
+               {"size": {"mode": "width", "width_mm": 50}, "copies": 3}],
+     "order": "as_listed", "path": "out/print-order.pdf", "auto_save": false}}
+ ],
+ "edges": [
+  {"from": {"node": 0, "port": "image"}, "to": {"node": 1, "port": "image"}},
+  {"from": {"node": 0, "port": "image"}, "to": {"node": 2, "port": "image"}},
+  {"from": {"node": 0, "port": "image"}, "to": {"node": 3, "port": "image"}},
+  {"from": {"node": 1, "port": "image"}, "to": {"node": 4, "port": "images"}},
+  {"from": {"node": 2, "port": "image"}, "to": {"node": 4, "port": "images"}},
+  {"from": {"node": 3, "port": "image"}, "to": {"node": 4, "port": "images"}}
+ ]}

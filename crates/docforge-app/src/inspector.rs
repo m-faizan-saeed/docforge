@@ -22,7 +22,7 @@ use docforge_nodes::{
     pdf_edit::{ColorRule, CropMode, PaletteEntry, Recolor, RecolorMode},
     pdf_input::images,
     pdf_overlay::{self, Align, Blend, PageSize},
-    print::{self, CutMarks, ItemSize, PageOrientation, Paper, PrintItem},
+    print::{self, CutMarks, ItemSize, PageOrientation, Paper, PieceOrder, PrintItem},
 };
 use eframe::egui::{self, Color32, DragValue, Grid, RichText, Slider, TextEdit, Ui};
 
@@ -68,9 +68,16 @@ pub fn node_params(
         k if k == PrintLayout::KIND => {
             let images = input_names(graph, registry, id, print::INPUT);
             let pdfs = input_names(graph, registry, id, print::PDF_INPUT);
-            graph
-                .edit_node::<PrintLayout, _>(id, |n| print_layout(ui, n, salt, &images, &pdfs))
-                .unwrap_or(false)
+            let mut swap = None;
+            let mut changed = graph
+                .edit_node::<PrintLayout, _>(id, |n| {
+                    print_layout(ui, n, salt, &images, &pdfs, &mut swap)
+                })
+                .unwrap_or(false);
+            if let Some((port, a, b)) = swap {
+                changed |= swap_pieces(graph, id, port, a, b);
+            }
+            changed
         }
         k if k == PdfOverlay::KIND => {
             let layers = input_names(graph, registry, id, pdf_overlay::INPUT);
@@ -899,6 +906,7 @@ fn print_layout(
     salt: u64,
     images: &[String],
     pdfs: &[String],
+    swap: &mut Option<(&'static str, usize, usize)>,
 ) -> bool {
     let mut changed = false;
 
@@ -911,18 +919,26 @@ fn print_layout(
             .weak(),
         );
     }
+    let mut moved = None;
     for (i, source) in images.iter().enumerate() {
         let mut item = node.item(i);
+        let title = format!("{}. {source}", i + 1);
+        let place = (i, images.len());
         if piece_card(
             ui,
             ("piece", i),
-            &format!("{}. {source}", i + 1),
+            &title,
             &mut item,
             false,
+            place,
+            &mut moved,
         ) {
             *node.item_mut(i) = item;
             changed = true;
         }
+    }
+    if let Some((a, b)) = moved.take() {
+        *swap = Some((print::INPUT, a, b));
     }
     if !pdfs.is_empty() {
         ui.label(RichText::new("PDF artwork (vector)").weak());
@@ -930,10 +946,22 @@ fn print_layout(
     for (i, source) in pdfs.iter().enumerate() {
         let mut item = node.pdf_item(i);
         let label = format!("PDF {}. {source}", i + 1);
-        if piece_card(ui, ("pdf_piece", i), &label, &mut item, true) {
+        let place = (i, pdfs.len());
+        if piece_card(
+            ui,
+            ("pdf_piece", i),
+            &label,
+            &mut item,
+            true,
+            place,
+            &mut moved,
+        ) {
             *node.pdf_item_mut(i) = item;
             changed = true;
         }
+    }
+    if let Some((a, b)) = moved {
+        *swap = Some((print::PDF_INPUT, a, b));
     }
 
     ui.add_space(6.0);
@@ -995,6 +1023,20 @@ fn print_layout(
                         .suffix(" mm"),
                 )
                 .changed();
+            ui.end_row();
+            ui.label("Order");
+            egui::ComboBox::from_id_salt("piece_order")
+                .selected_text(node.order.name())
+                .show_ui(ui, |ui| {
+                    for o in PieceOrder::ALL {
+                        changed |= ui.selectable_value(&mut node.order, o, o.name()).changed();
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "As listed: pieces follow the list above (⏶⏷ to reorder), \
+                     left to right in rows; uses more paper than “Fewest sheets”.",
+                );
             ui.end_row();
             ui.label("Cutting lines");
             egui::ComboBox::from_id_salt("cut_marks")
@@ -1063,13 +1105,36 @@ fn print_layout(
     changed
 }
 
-/// Settings card for one image or PDF piece. Returns whether it changed.
+/// Swaps pieces `a` and `b` on a Print Layout's `port` (images or PDFs):
+/// their connections and, with them, their settings.
+fn swap_pieces(graph: &mut Graph, id: NodeId, port: &str, a: usize, b: usize) -> bool {
+    if !graph.swap_inputs(id, port, a, b) {
+        return false;
+    }
+    let _ = graph.edit_node::<PrintLayout, _>(id, |n| {
+        let items = if port == print::INPUT {
+            n.item_mut(a.max(b));
+            &mut n.items
+        } else {
+            n.pdf_item_mut(a.max(b));
+            &mut n.pdf_items
+        };
+        items.swap(a, b);
+    });
+    true
+}
+
+/// Settings card for one image or PDF piece, number `index` of `count`.
+/// Returns whether it changed; a click on ⏶/⏷ sets `moved` to the two
+/// positions to swap.
 fn piece_card(
     ui: &mut Ui,
     salt: impl std::hash::Hash + std::fmt::Debug,
     title: &str,
     item: &mut PrintItem,
     is_pdf: bool,
+    (index, count): (usize, usize),
+    moved: &mut Option<(usize, usize)>,
 ) -> bool {
     let before = item.clone();
     ui.push_id(salt, |ui| {
@@ -1078,6 +1143,20 @@ fn piece_card(
             ui.horizontal(|ui| {
                 ui.label(RichText::new(title).strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(index + 1 < count, egui::Button::new("⏷").small())
+                        .on_hover_text("Move down")
+                        .clicked()
+                    {
+                        *moved = Some((index, index + 1));
+                    }
+                    if ui
+                        .add_enabled(index > 0, egui::Button::new("⏶").small())
+                        .on_hover_text("Move up")
+                        .clicked()
+                    {
+                        *moved = Some((index - 1, index));
+                    }
                     ui.add(DragValue::new(&mut item.copies).range(0..=500).suffix(" ×"));
                     ui.label(if item.fill { "At least" } else { "Copies" });
                 });
@@ -1706,4 +1785,47 @@ fn raw_json(ui: &mut Ui, graph: &mut Graph, id: NodeId, registry: &NodeRegistry)
         ui.colored_label(Color32::LIGHT_RED, err);
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use docforge_nodes::{InputImage, input_image};
+
+    use super::*;
+
+    #[test]
+    fn moving_a_print_piece_takes_its_settings_along() {
+        let mut graph = Graph::new();
+        let sources: Vec<NodeId> = (0..3).map(|_| graph.add(InputImage::default())).collect();
+        let mut settings = PrintLayout::default();
+        settings.item_mut(0).copies = 5;
+        let layout = graph.add(settings);
+        for &src in &sources {
+            graph
+                .connect(src, input_image::OUTPUT, layout, print::INPUT)
+                .unwrap();
+        }
+        let order = |g: &Graph| -> Vec<NodeId> {
+            g.edges()
+                .iter()
+                .filter(|e| e.to.node == layout)
+                .map(|e| e.from.node)
+                .collect()
+        };
+        let copies = |g: &Graph| -> Vec<u32> {
+            let n = g.node_as::<PrintLayout>(layout).unwrap();
+            (0..3).map(|i| n.item(i).copies).collect()
+        };
+
+        // Move the first piece down: it is now second, with its 5 copies.
+        assert!(swap_pieces(&mut graph, layout, print::INPUT, 0, 1));
+        assert_eq!(order(&graph), [sources[1], sources[0], sources[2]]);
+        assert_eq!(copies(&graph), [1, 5, 1]);
+        // And to the end.
+        assert!(swap_pieces(&mut graph, layout, print::INPUT, 1, 2));
+        assert_eq!(order(&graph), [sources[1], sources[2], sources[0]]);
+        assert_eq!(copies(&graph), [1, 1, 5]);
+        // Nothing to swap with past the end.
+        assert!(!swap_pieces(&mut graph, layout, print::INPUT, 2, 3));
+    }
 }

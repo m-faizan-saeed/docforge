@@ -96,6 +96,28 @@ pub enum PageOrientation {
     Landscape,
 }
 
+/// In which order pieces are placed on the sheets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PieceOrder {
+    /// Biggest first, wherever it fits best: fewest sheets.
+    #[default]
+    FewestSheets,
+    /// In the order of the piece list (images, then PDFs), row by row.
+    AsListed,
+}
+
+impl PieceOrder {
+    pub const ALL: [PieceOrder; 2] = [Self::FewestSheets, Self::AsListed];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::FewestSheets => "Fewest sheets (biggest first)",
+            Self::AsListed => "As listed (row by row)",
+        }
+    }
+}
+
 /// How large an item is printed.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -208,6 +230,7 @@ pub struct PrintLayout {
     /// Space between pieces, mm.
     pub gap_mm: f32,
     pub allow_rotation: bool,
+    pub order: PieceOrder,
     pub cut_marks: CutMarks,
     /// Maximum resolution of embedded images.
     pub image_dpi: f32,
@@ -231,6 +254,7 @@ impl Default for PrintLayout {
             margin_mm: 10.0,
             gap_mm: 4.0,
             allow_rotation: true,
+            order: PieceOrder::FewestSheets,
             cut_marks: CutMarks::Outline,
             image_dpi: 300.0,
             jpeg_quality: Some(90),
@@ -480,6 +504,7 @@ impl PrintLayout {
             margin: self.margin_mm,
             gap: self.gap_mm,
             allow_rotation: self.allow_rotation,
+            keep_order: self.order == PieceOrder::AsListed,
         })
     }
 
@@ -682,6 +707,22 @@ mod tests {
             "{:?}",
             doc.summary
         );
+    }
+
+    #[test]
+    fn order_defaults_to_fewest_sheets_and_as_listed_still_builds() {
+        // Projects saved before the setting existed keep their layout.
+        let old: PrintLayout = serde_json::from_str(r#"{"margin_mm": 5.0}"#).unwrap();
+        assert_eq!(old.order, PieceOrder::FewestSheets);
+        let layout = PrintLayout {
+            order: PieceOrder::AsListed,
+            ..PrintLayout::default()
+        };
+        let json = serde_json::to_string(&layout).unwrap();
+        assert!(json.contains(r#""order":"as_listed""#), "{json}");
+        let a6 = RasterImage::new(700, 990, [250, 250, 245, 255]);
+        let doc = layout.build(&[&id_card(), &a6, &id_card()]).unwrap();
+        assert!(doc.summary[0].starts_with("3 pieces"), "{:?}", doc.summary);
     }
 
     #[test]

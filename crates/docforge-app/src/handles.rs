@@ -46,6 +46,13 @@ const HIT_TOUCH: f32 = GRIP * 3.5;
 
 /// Where [`dragging`] keeps the frame in which a handle was last dragged.
 const DRAG_MARK: &str = "docforge_handle_drag";
+/// Where [`set_magnifier`] keeps whether the magnifier is wanted.
+const MAGNIFIER_ON: &str = "docforge_magnifier_on";
+
+/// Turns the magnifier shown while dragging a grip on or off (default on).
+pub fn set_magnifier(ctx: &Context, on: bool) {
+    ctx.data_mut(|d| d.insert_temp(Id::unique(MAGNIFIER_ON), on));
+}
 
 /// Whether a handle is being dragged this frame (the finger or button may be
 /// resting). Call after the handles were drawn.
@@ -228,8 +235,9 @@ fn loupe_rect(finger: Pos2, bounds: Rect) -> Rect {
     r.translate(shift)
 }
 
-/// While a finger drags a grip, shows the image around the grip enlarged,
-/// beside the finger, so the spot under the fingertip stays visible.
+/// While a grip is dragged, shows the image around it enlarged, above the
+/// finger or cursor, so the spot under a fingertip stays visible (see
+/// [`set_magnifier`]).
 /// `at` is the grip (normalised); `shape` is the edited outline, drawn too.
 fn magnifier(
     ui: &Ui,
@@ -239,8 +247,12 @@ fn magnifier(
     closed: bool,
     color: Color32,
 ) {
-    let (touching, finger) = ui.input(|i| (i.any_touches(), i.pointer.interact_pos()));
-    let (true, Some(finger), Some(texture)) = (touching, finger, frame.texture) else {
+    let on = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(Id::unique(MAGNIFIER_ON)))
+        .unwrap_or(true);
+    let finger = ui.input(|i| i.pointer.interact_pos());
+    let (true, Some(finger), Some(texture)) = (on, finger, frame.texture) else {
         return;
     };
     let loupe = loupe_rect(finger, ui.ctx().content_rect());
@@ -815,7 +827,7 @@ mod interaction_tests {
     }
 
     #[test]
-    fn a_finger_dragging_a_grip_gets_a_magnifier_and_a_mouse_does_not() {
+    fn dragging_a_grip_shows_the_magnifier_unless_switched_off() {
         let texture = TextureId::User(7);
         let frame = ImageFrame {
             texture: Some(texture),
@@ -827,8 +839,11 @@ mod interaction_tests {
                 _ => false,
             })
         };
-        for touch in [true, false] {
+        for (touch, on) in [(true, true), (false, true), (true, false), (false, false)] {
             let ctx = Context::default();
+            if !on {
+                set_magnifier(&ctx, false);
+            }
             let mut r = [0.25, 0.25, 0.75, 0.75];
             // East grip at (400, 300) → 40 px right; then the south grip,
             // now at (320, 400), 40 px down: the second touch starts far
@@ -847,7 +862,11 @@ mod interaction_tests {
             close(r[2], 0.85);
             close(r[3], 0.85);
             assert_eq!((r[0], r[1]), (0.25, 0.25), "touch: {touch}");
-            assert_eq!(shown.iter().any(|&m| m), touch, "touch: {touch}, {shown:?}");
+            assert_eq!(
+                shown.iter().any(|&m| m),
+                on,
+                "touch {touch}, on {on}: {shown:?}"
+            );
         }
     }
 }

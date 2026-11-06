@@ -16,6 +16,7 @@ cargo build --release
 | `enhance-edit.json` | Input Image → Enhance Image → Output Image | Each step's **✥**: page corners (Crop to document), crop box, rectangle, watermark position, line ends. Ctrl+D / Ctrl+C / Ctrl+V on nodes |
 | `pdf-edit-manual-crop.json` | PDF Input → PDF Edit | Manual crop: **✥ Adjust on preview**, drag the box, then leave adjust mode; Output/Input tabs |
 | `pcb-guide-one-pdf.json` | PDF Input → PDF Edit → Print Layout | Recolour by palette (red → black, black → gray), crop to content, fill an A4 sheet |
+| `print-order.json` | Input Image → 3 × Enhance Image → Print Layout | **Order: As listed** — pieces follow the list row by row; reorder with ⏶⏷ (settings move along); switch to *Fewest sheets* to compare |
 | `pcb-overlay.json` | PDF Input → 2 × PDF Edit → PDF Overlay → Print Layout | Assembly guide: gray bottom layer, black top layer (Multiply, nudged 4 × 3 mm). Reorder with ⏶⏷, drag a layer with **✥**, hide a layer, change blend/opacity |
 
 The PCB projects use `inputs/simple-smps.pdf` (the reference PCB layout, also a test fixture).

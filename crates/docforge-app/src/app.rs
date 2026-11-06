@@ -92,6 +92,8 @@ pub struct DocforgeApp {
     /// Preview this node regardless of the selection.
     pinned: Option<NodeId>,
     show_input: bool,
+    /// Show an enlarged view beside the pointer while dragging a handle.
+    magnifier: bool,
     /// Whether the settings panel (inspector) is shown; decided from the
     /// screen width on the first frame.
     inspector_open: Option<bool>,
@@ -164,6 +166,7 @@ impl DocforgeApp {
             palette: None,
             pinned: None,
             show_input: false,
+            magnifier: true,
             inspector_open: None,
             preview_edit: None,
             canvas: CanvasState::default(),
@@ -1354,6 +1357,11 @@ impl DocforgeApp {
         (Some(node) == target && self.graph.node_as::<PdfEdit>(node).is_some()).then_some(node)
     }
 
+    fn magnifier_toggle(&mut self, ui: &mut egui::Ui) {
+        ui.toggle_value(&mut self.magnifier, "🔍 Magnifier")
+            .on_hover_text("While dragging a handle, show the spot under it enlarged");
+    }
+
     /// The preview while adjusting a PDF Edit crop: the *incoming* page with
     /// a crop box. Dragging it switches the node to a manual box.
     fn pdf_crop_preview(&mut self, ui: &mut egui::Ui, node: NodeId) {
@@ -1367,6 +1375,7 @@ impl DocforgeApp {
                 if ui.button("Done").on_hover_text("Esc").clicked() {
                     self.edit_step = None;
                 }
+                self.magnifier_toggle(ui);
             });
         });
         let Some(input) = self.input_document_of(node).cloned() else {
@@ -1553,6 +1562,7 @@ impl DocforgeApp {
                 if ui.button("Done").on_hover_text("Esc").clicked() {
                     self.edit_step = None;
                 }
+                self.magnifier_toggle(ui);
             });
         });
         if self.edit_step.is_none() {
@@ -1657,6 +1667,7 @@ impl eframe::App for DocforgeApp {
             self.results = Some(result);
         }
         self.handle_global_input(&ctx);
+        handles::set_magnifier(&ctx, self.magnifier);
         // Phones start with the settings hidden (the "Settings" button
         // shows them).
         let screen = ui.available_width();
