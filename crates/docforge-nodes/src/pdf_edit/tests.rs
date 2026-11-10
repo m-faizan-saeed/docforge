@@ -252,6 +252,7 @@ fn replace_rules_strokes_only_and_grayscale() {
         rules: vec![ColorRule {
             from: [250, 5, 5],
             to: [0, 128, 0],
+            remove: false,
         }],
         tolerance: 10,
         ..Recolor::default()
@@ -277,6 +278,142 @@ fn replace_rules_strokes_only_and_grayscale() {
     assert_rgb(px(40.0, 40.0), [76, 76, 76]); // luma of red
 }
 
+// ----- removing colours (transparency) ------------------------------------------
+
+#[test]
+fn removing_white_uncovers_what_a_white_background_hid() {
+    // A red square under a page-sized white box, then a blue square on top.
+    let bytes = pdf("1 0 0 rg 20 20 40 40 re f \
+                     1 g 0 0 200 200 re f \
+                     0 0 1 rg 120 20 40 40 re f");
+    let before = render(&bytes, 1.0);
+    assert_rgb(before(40.0, 40.0), [255, 255, 255]);
+
+    let doc = edit(&bytes, &recolor_only(Recolor::remove_white()));
+    let px = render(&doc.bytes, 1.0);
+    assert_rgb(px(40.0, 40.0), [255, 0, 0]);
+    assert_rgb(px(140.0, 40.0), [0, 0, 255]);
+    assert!(
+        doc.summary[0].contains("1 shape removed"),
+        "{:?}",
+        doc.summary
+    );
+    // Still vector: the box is no longer painted, not covered by an image.
+    let (out, page) = page_of(&doc.bytes);
+    let content = String::from_utf8_lossy(&out.get_page_content(page)).into_owned();
+    assert!(
+        content.contains("re\nn") || content.contains("re n"),
+        "{content}"
+    );
+}
+
+#[test]
+fn removing_a_fill_keeps_its_outline_and_the_other_way_round() {
+    // Red underlay; a white-filled square with a blue outline (`B`).
+    let scene = "1 0 0 rg 0 0 200 200 re f \
+                 1 g 0 0 1 RG 10 w 40 40 120 120 re B";
+    let doc = edit(&pdf(scene), &recolor_only(Recolor::remove_white()));
+    let px = render(&doc.bytes, 1.0);
+    assert_rgb(px(100.0, 100.0), [255, 0, 0]); // fill gone: red shows
+    assert_rgb(px(40.0, 100.0), [0, 0, 255]); // outline stays
+
+    let remove_blue = Recolor {
+        mode: RecolorMode::Replace,
+        rules: vec![ColorRule {
+            from: [0, 0, 255],
+            to: [0, 0, 0],
+            remove: true,
+        }],
+        ..Recolor::default()
+    };
+    let px = render(&edit(&pdf(scene), &recolor_only(remove_blue)).bytes, 1.0);
+    assert_rgb(px(100.0, 100.0), [255, 255, 255]); // fill stays
+    assert_rgb(px(37.0, 100.0), [255, 0, 0]); // outer half of the outline gone
+
+    // A removed colour stays removed until another colour is set, and q/Q
+    // restore it like any colour.
+    let scene = "1 g q 0 0 1 rg 20 20 40 40 re f Q 120 20 40 40 re f";
+    let doc = edit(&pdf(scene), &recolor_only(Recolor::remove_white()));
+    let (out, page) = page_of(&doc.bytes);
+    let ops: Vec<String> = lopdf::content::Content::decode(&out.get_page_content(page))
+        .unwrap()
+        .operations
+        .into_iter()
+        .map(|o| o.operator)
+        .collect();
+    assert_eq!(ops.iter().filter(|o| *o == "f").count(), 1, "{ops:?}");
+    assert_eq!(ops.iter().filter(|o| *o == "n").count(), 1, "{ops:?}");
+}
+
+#[test]
+fn single_colour_mode_can_remove_white_instead_of_keeping_it() {
+    let r = Recolor {
+        remove_white: true,
+        ..Recolor::pcb_top()
+    };
+    let px = render(&edit(&pdf(SCENE), &recolor_only(r)).bytes, 1.0);
+    assert_rgb(px(40.0, 40.0), [0, 0, 0]); // red → black
+    assert_rgb(px(140.0, 40.0), [255, 255, 255]); // white box: not drawn
+    assert_eq!(
+        Recolor::pcb_top().map([1.0; 3], false),
+        None,
+        "keep white is unchanged"
+    );
+    assert_eq!(
+        Recolor {
+            remove_white: true,
+            ..Recolor::pcb_top()
+        }
+        .map([1.0; 3], true),
+        Some(Paint::Remove)
+    );
+}
+
+#[test]
+fn text_in_a_removed_colour_is_made_invisible() {
+    use recolor::tests_support::rewrite_plain;
+    let out = rewrite_plain(
+        b"1 g BT /F1 12 Tf 10 10 Td (Hi) Tj ET 0 g BT (Ho) Tj ET",
+        &Recolor::remove_white(),
+    );
+    let text = String::from_utf8_lossy(&out);
+    // Hidden around the white run only, then back to the previous mode.
+    assert!(text.contains("3 Tr\n(Hi) Tj\n0 Tr"), "{text}");
+    assert_eq!(text.matches("Tr").count(), 2, "{text}");
+}
+
+#[test]
+fn rules_saved_before_removal_existed_still_load() {
+    let old: ColorRule = serde_json::from_str(r#"{"from":[1,2,3],"to":[4,5,6]}"#).unwrap();
+    assert!(!old.remove);
+    let json = serde_json::to_string(&old).unwrap();
+    assert!(!json.contains("remove"), "unchanged on save: {json}");
+    let r: Recolor = serde_json::from_str(r#"{"mode":"single"}"#).unwrap();
+    assert!(!r.remove_white && r.keep_white);
+}
+
+#[test]
+fn removing_the_top_layers_white_background_shows_the_layer_below() {
+    use crate::{PdfOverlay, pdf_overlay::Blend};
+    let load = |bytes: &[u8], recolor: Recolor| edit(bytes, &recolor_only(recolor));
+    let bottom = load(&pdf("1 0 0 rg 20 20 40 40 re f"), Recolor::default());
+    let top_bytes = pdf("1 g 0 0 200 200 re f 0 g 120 120 40 40 re f");
+    let overlay = PdfOverlay::default();
+    assert_eq!(overlay.layer(1).blend, Blend::Normal);
+
+    let hidden = overlay
+        .apply(&[&bottom, &load(&top_bytes, Recolor::default())])
+        .unwrap();
+    assert_rgb(render(&hidden.bytes, 1.0)(40.0, 40.0), [255, 255, 255]);
+
+    let shown = overlay
+        .apply(&[&bottom, &load(&top_bytes, Recolor::remove_white())])
+        .unwrap();
+    let px = render(&shown.bytes, 1.0);
+    assert_rgb(px(40.0, 40.0), [255, 0, 0]);
+    assert_rgb(px(140.0, 140.0), [0, 0, 0]);
+}
+
 #[test]
 fn colour_spaces_are_restored_for_colours_left_alone() {
     // Indexed palette: 0 = red, 1 = blue. Index 0 is replaced, index 1 is
@@ -297,6 +434,7 @@ fn colour_spaces_are_restored_for_colours_left_alone() {
         rules: vec![ColorRule {
             from: [255, 0, 0],
             to: [0, 0, 0],
+            remove: false,
         }],
         ..Recolor::default()
     };

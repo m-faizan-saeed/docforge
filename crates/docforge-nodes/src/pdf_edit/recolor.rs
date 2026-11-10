@@ -9,6 +9,12 @@
 //! their original colour space (spot colours stay spot colours). Since a
 //! replacement switches the stream to DeviceRGB, the original colour space is
 //! re-selected before any later untouched `sc`/`scn` that depends on it.
+//!
+//! A colour can also be *removed*: shapes painted with it are not drawn at
+//! all (their painting operator becomes `n`, or the other half of a
+//! fill-and-stroke), and text in it becomes invisible (render mode 3), so
+//! whatever lies underneath shows through — e.g. a white page background
+//! that would hide the layer below in an overlay.
 
 use std::collections::{HashMap, HashSet};
 
@@ -37,6 +43,17 @@ pub enum RecolorMode {
 pub struct ColorRule {
     pub from: [u8; 3],
     pub to: [u8; 3],
+    /// Instead of `to`: don't draw what is painted in this colour.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remove: bool,
+}
+
+/// What a colour becomes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Paint {
+    Color([f32; 3]),
+    /// Not drawn (transparent).
+    Remove,
 }
 
 /// Settings for changing vector colours.
@@ -49,6 +66,9 @@ pub struct Recolor {
     /// In `single` mode, leave near-white colours alone so white details
     /// (pads, holes, knock-outs) stay white.
     pub keep_white: bool,
+    /// In `single` mode, don't draw near-white shapes at all (e.g. a white
+    /// background); takes precedence over `keep_white`.
+    pub remove_white: bool,
     /// Rules for `replace`, tried in order.
     pub rules: Vec<ColorRule>,
     /// How far (per channel, 0–255) a colour may differ from a rule's `from`.
@@ -65,6 +85,7 @@ impl Default for Recolor {
             mode: RecolorMode::Off,
             color: [0, 0, 0],
             keep_white: true,
+            remove_white: false,
             rules: Vec::new(),
             tolerance: 24,
             strokes: true,
@@ -92,12 +113,26 @@ impl Recolor {
         }
     }
 
+    /// Removes white shapes (a page background, white boxes behind the
+    /// art) and leaves every other colour as it is.
+    pub fn remove_white() -> Self {
+        Self {
+            mode: RecolorMode::Replace,
+            rules: vec![ColorRule {
+                from: [255, 255, 255],
+                to: [255, 255, 255],
+                remove: true,
+            }],
+            ..Self::default()
+        }
+    }
+
     pub fn is_active(&self) -> bool {
         self.mode != RecolorMode::Off && (self.strokes || self.fills)
     }
 
-    /// The new colour for `rgb` (0..1), or `None` to leave it unchanged.
-    pub fn map(&self, rgb: [f32; 3], stroke: bool) -> Option<[f32; 3]> {
+    /// What `rgb` (0..1) becomes, or `None` to leave it unchanged.
+    pub fn map(&self, rgb: [f32; 3], stroke: bool) -> Option<Paint> {
         if (stroke && !self.strokes) || (!stroke && !self.fills) {
             return None;
         }
@@ -106,18 +141,30 @@ impl Recolor {
             RecolorMode::Off => None,
             RecolorMode::Single => {
                 let white = rgb.iter().all(|&c| c >= 0.94);
-                (!(self.keep_white && white)).then_some(to_f(self.color))
+                if white && self.remove_white {
+                    Some(Paint::Remove)
+                } else if white && self.keep_white {
+                    None
+                } else {
+                    Some(Paint::Color(to_f(self.color)))
+                }
             }
             RecolorMode::Replace => {
                 let tol = self.tolerance as f32 / 255.0 + 1e-4;
                 self.rules
                     .iter()
                     .find(|r| (0..3).all(|i| (rgb[i] - r.from[i] as f32 / 255.0).abs() <= tol))
-                    .map(|r| to_f(r.to))
+                    .map(|r| {
+                        if r.remove {
+                            Paint::Remove
+                        } else {
+                            Paint::Color(to_f(r.to))
+                        }
+                    })
             }
             RecolorMode::Grayscale => {
                 let l = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
-                Some([l, l, l])
+                Some(Paint::Color([l, l, l]))
             }
         }
     }
@@ -128,6 +175,8 @@ impl Recolor {
 pub struct RecolorStats {
     /// Colour settings replaced.
     pub changed: usize,
+    /// Shapes and text runs no longer drawn because their colour is removed.
+    pub removed: usize,
     /// Colour settings left alone by the mapping.
     pub kept: usize,
     /// Gradient fills (`sh`) and pattern colours, which are not recoloured.
@@ -184,7 +233,7 @@ pub fn palette(bytes: &[u8]) -> Vec<PaletteEntry> {
     out
 }
 
-type Mapper<'a> = dyn FnMut([f32; 3], bool) -> Option<[f32; 3]> + 'a;
+type Mapper<'a> = dyn FnMut([f32; 3], bool) -> Option<Paint> + 'a;
 
 /// Visits every content stream reachable from the pages; with `write`,
 /// stores the rewritten streams back.
@@ -428,6 +477,8 @@ struct Side {
     select: Operation,
     /// Whether the output stream's current colour space is `space`.
     in_sync: bool,
+    /// The current colour is removed: what this side paints is not drawn.
+    hidden: bool,
 }
 
 impl Side {
@@ -439,7 +490,64 @@ impl Side {
                 vec![Object::Name(b"DeviceGray".to_vec())],
             ),
             in_sync: true,
+            hidden: false,
         }
+    }
+}
+
+/// The painting operator `op` with the removed half (fill and/or stroke)
+/// left out, or `None` when nothing it paints is removed.
+fn without_hidden(op: &str, fill_hidden: bool, stroke_hidden: bool) -> Option<Vec<&'static str>> {
+    let (fills, strokes) = match op {
+        "f" | "F" | "f*" => (true, false),
+        "S" | "s" => (false, true),
+        "B" | "B*" | "b" | "b*" => (true, true),
+        _ => return None,
+    };
+    let fill_gone = fills && fill_hidden;
+    let stroke_gone = strokes && stroke_hidden;
+    if !fill_gone && !stroke_gone {
+        return None;
+    }
+    let even_odd = op.ends_with('*');
+    let closes = matches!(op, "s" | "b" | "b*");
+    Some(match (fills && !fill_gone, strokes && !stroke_gone) {
+        // Only the fill stays.
+        (true, false) => {
+            let fill = if even_odd { "f*" } else { "f" };
+            if closes { vec!["h", fill] } else { vec![fill] }
+        }
+        // Only the outline stays.
+        (false, true) => vec![if closes { "s" } else { "S" }],
+        // Nothing is drawn; the path is still ended (a pending clip, `W`,
+        // still applies).
+        _ => vec!["n"],
+    })
+}
+
+/// Text render mode `mode` with the removed halves made invisible.
+fn text_mode_without_hidden(mode: i64, fill_hidden: bool, stroke_hidden: bool) -> i64 {
+    let (fills, strokes, clips) = match mode {
+        0 => (true, false, false),
+        1 => (false, true, false),
+        2 => (true, true, false),
+        4 => (true, false, true),
+        5 => (false, true, true),
+        6 => (true, true, true),
+        7 => (false, false, true),
+        _ => (false, false, false),
+    };
+    let (f, s) = (fills && !fill_hidden, strokes && !stroke_hidden);
+    let visible = match (f, s) {
+        (true, false) => 0,
+        (false, true) => 1,
+        (true, true) => 2,
+        (false, false) => 3,
+    };
+    match (clips, visible) {
+        (false, v) => v,
+        (true, 3) => 7,
+        (true, v) => v + 4,
     }
 }
 
@@ -454,7 +562,9 @@ fn rewrite(
     let ops = Content::decode(content).ok()?.operations;
     let mut out: Vec<Operation> = Vec::with_capacity(ops.len());
     let (mut fill, mut stroke) = (Side::new(false), Side::new(true));
-    let mut stack: Vec<(Side, Side)> = Vec::new();
+    // Text render mode (Tr), part of the graphics state like the colours.
+    let mut text_mode: i64 = 0;
+    let mut stack: Vec<(Side, Side, i64)> = Vec::new();
 
     for op in ops {
         let name = op.operator.as_str();
@@ -462,15 +572,39 @@ fn rewrite(
         let comps: Vec<f64> = op.operands.iter().filter_map(num).collect();
         match name {
             "q" => {
-                stack.push((fill.clone(), stroke.clone()));
+                stack.push((fill.clone(), stroke.clone(), text_mode));
                 out.push(op);
             }
             "Q" => {
-                if let Some((f, s)) = stack.pop() {
+                if let Some((f, s, t)) = stack.pop() {
                     fill = f;
                     stroke = s;
+                    text_mode = t;
                 }
                 out.push(op);
+            }
+            "f" | "F" | "f*" | "S" | "s" | "B" | "B*" | "b" | "b*" => {
+                match without_hidden(name, fill.hidden, stroke.hidden) {
+                    Some(ops) => {
+                        stats.removed += 1;
+                        out.extend(ops.into_iter().map(|o| Operation::new(o, vec![])));
+                    }
+                    None => out.push(op),
+                }
+            }
+            "Tr" => {
+                text_mode = comps.first().map_or(0, |&m| m as i64);
+                out.push(op);
+            }
+            "Tj" | "TJ" | "'" | "\"" => {
+                let mode = text_mode_without_hidden(text_mode, fill.hidden, stroke.hidden);
+                if mode == text_mode {
+                    out.push(op);
+                } else {
+                    stats.removed += 1;
+                    let tr = |m: i64| Operation::new("Tr", vec![Object::Integer(m)]);
+                    out.extend([tr(mode), op, tr(text_mode)]);
+                }
             }
             "g" | "G" | "rg" | "RG" | "k" | "K" => {
                 let side = if is_stroke { &mut stroke } else { &mut fill };
@@ -500,6 +634,7 @@ fn rewrite(
                 side.select = op.clone();
                 if matches!(side.space, Space::Pattern | Space::Unknown) {
                     side.in_sync = true;
+                    side.hidden = false;
                     out.push(op);
                 } else {
                     // `cs` also sets the colour to the space's initial value.
@@ -519,6 +654,7 @@ fn rewrite(
                         out.push(side.select.clone());
                         side.in_sync = true;
                     }
+                    side.hidden = false;
                     out.push(op);
                 } else {
                     emit_color(&mut out, side, &comps, op, is_stroke, map, stats);
@@ -547,8 +683,9 @@ fn emit_color(
     stats: &mut RecolorStats,
 ) {
     let mapped = side.space.to_rgb(comps).and_then(|rgb| map(rgb, stroke));
+    side.hidden = mapped == Some(Paint::Remove);
     match mapped {
-        Some([r, g, b]) => {
+        Some(Paint::Color([r, g, b])) => {
             stats.changed += 1;
             out.push(Operation::new(
                 if stroke { "RG" } else { "rg" },
@@ -556,8 +693,12 @@ fn emit_color(
             ));
             side.in_sync = matches!(side.space, Space::Rgb);
         }
-        None => {
-            stats.kept += 1;
+        // A removed colour is still set (later operators may rely on the
+        // colour space); the painting operators leave out what uses it.
+        Some(Paint::Remove) | None => {
+            if mapped.is_none() {
+                stats.kept += 1;
+            }
             let selects_space = matches!(
                 original.operator.as_str(),
                 "g" | "G" | "rg" | "RG" | "k" | "K" | "cs" | "CS"
@@ -568,5 +709,65 @@ fn emit_color(
             out.push(original);
             side.in_sync = true;
         }
+    }
+}
+
+#[cfg(test)]
+pub(super) mod tests_support {
+    use super::*;
+
+    /// Rewrites a lone content stream (no resources) with `recolor`.
+    pub fn rewrite_plain(content: &[u8], recolor: &Recolor) -> Vec<u8> {
+        let doc = Document::with_version("1.5");
+        let mut map = |rgb: [f32; 3], stroke: bool| recolor.map(rgb, stroke);
+        rewrite(
+            &doc,
+            content,
+            &Dictionary::new(),
+            &mut map,
+            &mut RecolorStats::default(),
+        )
+        .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn painting_operators_drop_only_the_removed_half() {
+        let cases = [
+            ("f", (true, false), Some(vec!["n"])),
+            ("f*", (true, true), Some(vec!["n"])),
+            ("f", (false, true), None),
+            ("S", (false, true), Some(vec!["n"])),
+            ("s", (true, false), None),
+            ("B", (true, false), Some(vec!["S"])),
+            ("B*", (false, true), Some(vec!["f*"])),
+            ("b", (true, false), Some(vec!["s"])),
+            ("b", (false, true), Some(vec!["h", "f"])),
+            ("b*", (false, true), Some(vec!["h", "f*"])),
+            ("B", (true, true), Some(vec!["n"])),
+            ("n", (true, true), None),
+        ];
+        for (op, (fill, stroke), expected) in cases {
+            assert_eq!(
+                without_hidden(op, fill, stroke),
+                expected,
+                "{op} {fill} {stroke}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_render_modes_lose_the_removed_half_and_keep_clipping() {
+        assert_eq!(text_mode_without_hidden(0, true, false), 3);
+        assert_eq!(text_mode_without_hidden(0, false, true), 0);
+        assert_eq!(text_mode_without_hidden(2, true, false), 1);
+        assert_eq!(text_mode_without_hidden(2, false, true), 0);
+        assert_eq!(text_mode_without_hidden(6, true, true), 7);
+        assert_eq!(text_mode_without_hidden(4, true, false), 7);
+        assert_eq!(text_mode_without_hidden(3, true, true), 3);
     }
 }

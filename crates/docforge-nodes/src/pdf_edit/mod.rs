@@ -13,7 +13,7 @@ use lopdf::Object;
 use serde::{Deserialize, Serialize};
 
 pub use migrate::migrate_pdf_input_crop;
-pub use recolor::{ColorRule, PaletteEntry, Recolor, RecolorMode, RecolorStats, palette};
+pub use recolor::{ColorRule, Paint, PaletteEntry, Recolor, RecolorMode, RecolorStats, palette};
 
 use crate::{
     pdf::{
@@ -157,7 +157,10 @@ impl PdfEdit {
             }
         }
 
-        let changed = cropped > 0 || recolored.as_ref().is_some_and(|s| s.changed > 0);
+        let changed = cropped > 0
+            || recolored
+                .as_ref()
+                .is_some_and(|s| s.changed + s.removed > 0);
         let bytes = if changed {
             pdf::save(&mut doc).map_err(fail)?
         } else {
@@ -212,6 +215,13 @@ impl PdfEdit {
                 r.changed,
                 if r.changed == 1 { "" } else { "s" }
             );
+            if r.removed > 0 {
+                first += &format!(
+                    " · {} shape{} removed",
+                    r.removed,
+                    if r.removed == 1 { "" } else { "s" }
+                );
+            }
         }
         let mut summary = vec![first];
         if self.crop == CropMode::Content {

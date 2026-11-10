@@ -1,0 +1,14 @@
+{"version": 1,
+ "nodes": [
+  {"id": 0, "kind": "pdf_input", "params": {"path": "inputs/red-stripes.pdf"}, "meta": {"position": [0, 0], "label": "Bottom: stripes"}},
+  {"id": 1, "kind": "pdf_input", "params": {"path": "inputs/white-background.pdf"}, "meta": {"position": [0, 120], "label": "Top: white background"}},
+  {"id": 2, "kind": "pdf_edit", "params": {"crop": "none"}, "meta": {"position": [240, 0]}},
+  {"id": 3, "kind": "pdf_edit", "params": {"crop": "none", "recolor": {"mode": "replace", "rules": [{"from": [255, 255, 255], "to": [255, 255, 255], "remove": true}]}}, "meta": {"position": [240, 120], "label": "Remove white"}},
+  {"id": 4, "kind": "pdf_overlay", "params": {}, "meta": {"position": [480, 60]}}
+ ],
+ "edges": [
+  {"from": {"node": 0, "port": "pdf"}, "to": {"node": 2, "port": "pdf"}},
+  {"from": {"node": 1, "port": "pdf"}, "to": {"node": 3, "port": "pdf"}},
+  {"from": {"node": 2, "port": "pdf"}, "to": {"node": 4, "port": "pdfs"}},
+  {"from": {"node": 3, "port": "pdf"}, "to": {"node": 4, "port": "pdfs"}}
+ ]}

@@ -14,7 +14,7 @@ use docforge_core::{
 use docforge_nodes::{
     EnhanceImage, InputImage, OutputImage, PdfEdit, PdfOverlay, PrintLayout,
     enhance::{step_input_key, step_output_key},
-    input_image, output_image,
+    input_image,
     pdf::{self as pdfkit, PageBox},
     pdf_edit::{CropMode, PaletteEntry},
     pdf_overlay,
@@ -315,19 +315,11 @@ impl DocforgeApp {
         };
         let input = g.add_node_with_meta(Box::new(InputImage::default()), at(0.0, 40.0));
         let enhance = g.add_node_with_meta(Box::new(EnhanceImage::default()), at(240.0, 40.0));
-        let output = g.add_node_with_meta(Box::new(OutputImage::default()), at(480.0, 40.0));
         g.connect(
             input,
             input_image::OUTPUT,
             enhance,
             docforge_nodes::enhance::INPUT,
-        )
-        .expect("template wiring is valid");
-        g.connect(
-            enhance,
-            docforge_nodes::enhance::OUTPUT,
-            output,
-            output_image::INPUT,
         )
         .expect("template wiring is valid");
         let print = g.add_node_with_meta(Box::new(PrintLayout::default()), at(480.0, 150.0));

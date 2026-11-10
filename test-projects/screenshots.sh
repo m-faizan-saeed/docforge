@@ -24,3 +24,5 @@ shot pcb-guide-sheet pcb-guide-one-pdf.json 2
 shot pcb-overlay-panel pcb-overlay.json 3
 shot pcb-overlay-drag-top pcb-overlay.json 3 1
 shot print-order print-order.json 4
+shot remove-white-edit remove-white-overlay.json 3
+shot remove-white-overlay remove-white-overlay.json 4

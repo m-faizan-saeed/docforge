@@ -514,6 +514,18 @@ fn pdf_edit(ui: &mut Ui, node: &mut PdfEdit, extras: Extras<'_>) -> bool {
                     changed = true;
                     ui.close();
                 }
+                if ui
+                    .button("Remove white background")
+                    .on_hover_text(
+                        "White shapes are not drawn, so a layer below shows through \
+                         in PDF Overlay",
+                    )
+                    .clicked()
+                {
+                    node.recolor = Recolor::remove_white();
+                    changed = true;
+                    ui.close();
+                }
                 if ui.button("Grayscale").clicked() {
                     node.recolor = Recolor {
                         mode: RecolorMode::Grayscale,
@@ -566,10 +578,38 @@ fn pdf_edit(ui: &mut Ui, node: &mut PdfEdit, extras: Extras<'_>) -> bool {
             }
         });
     if r.mode == RecolorMode::Single {
-        changed |= ui
-            .checkbox(&mut r.keep_white, "Keep white")
-            .on_hover_text("White details (pads, holes, knock-outs) stay white")
-            .changed();
+        // Keep / recolour / remove, stored as two flags.
+        let before = match (r.remove_white, r.keep_white) {
+            (true, _) => 2,
+            (false, true) => 0,
+            (false, false) => 1,
+        };
+        let mut white = before;
+        let names = [
+            "Keep white",
+            "Recolour white too",
+            "Remove white (transparent)",
+        ];
+        ui.horizontal(|ui| {
+            ui.label("White");
+            egui::ComboBox::from_id_salt("white_mode")
+                .selected_text(names[white])
+                .show_ui(ui, |ui| {
+                    for (i, name) in names.iter().enumerate() {
+                        ui.selectable_value(&mut white, i, *name);
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "Keep: white details (pads, holes, knock-outs) stay white. \
+                     Remove: white shapes are not drawn, so what is below shows through.",
+                );
+        });
+        if white != before {
+            r.remove_white = white == 2;
+            r.keep_white = white != 1;
+            changed = true;
+        }
     }
     if r.mode == RecolorMode::Replace {
         changed |= color_rules(ui, r, extras.palette.as_deref().map(Vec::as_slice));
@@ -626,6 +666,7 @@ fn color_rules(ui: &mut Ui, r: &mut Recolor, palette: Option<&[PaletteEntry]>) -
                         None if on => r.rules.push(ColorRule {
                             from: entry.rgb,
                             to: [0, 0, 0],
+                            remove: false,
                         }),
                         _ => {}
                     }
@@ -634,10 +675,7 @@ fn color_rules(ui: &mut Ui, r: &mut Recolor, palette: Option<&[PaletteEntry]>) -
                 swatch(ui, entry.rgb);
                 match r.rules.iter_mut().find(|rule| rule.from == entry.rgb) {
                     Some(rule) => {
-                        ui.horizontal(|ui| {
-                            ui.label("→");
-                            changed |= ui.color_edit_button_srgb(&mut rule.to).changed();
-                        });
+                        ui.horizontal(|ui| changed |= rule_target(ui, rule));
                     }
                     None => {
                         ui.label(RichText::new("unchanged").weak());
@@ -668,8 +706,7 @@ fn color_rules(ui: &mut Ui, r: &mut Recolor, palette: Option<&[PaletteEntry]>) -
         for i in orphans {
             ui.horizontal(|ui| {
                 swatch(ui, r.rules[i].from);
-                ui.label("→");
-                changed |= ui.color_edit_button_srgb(&mut r.rules[i].to).changed();
+                changed |= rule_target(ui, &mut r.rules[i]);
                 if ui.small_button("🗑").clicked() {
                     remove = Some(i);
                 }
@@ -680,6 +717,23 @@ fn color_rules(ui: &mut Ui, r: &mut Recolor, palette: Option<&[PaletteEntry]>) -
             changed = true;
         }
     }
+    changed
+}
+
+/// "→ colour" or "→ removed" for one replace rule, with a switch between
+/// them. Returns whether it changed.
+fn rule_target(ui: &mut Ui, rule: &mut ColorRule) -> bool {
+    let mut changed = false;
+    ui.label("→");
+    if !rule.remove {
+        changed |= ui.color_edit_button_srgb(&mut rule.to).changed();
+    } else {
+        ui.label(RichText::new("removed").italics());
+    }
+    changed |= ui
+        .toggle_value(&mut rule.remove, "Remove")
+        .on_hover_text("Don't draw what is painted in this colour (transparent)")
+        .changed();
     changed
 }
 
